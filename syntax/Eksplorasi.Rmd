@@ -1,0 +1,1828 @@
+---
+title: "**Perbandingan Metode Parametrik Log-logistik dengan Stratified Cox Model dalam Analisis Survival Kasus Perceraian di U.S.A.**"
+author: "Joshua Bryan Wijaya"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::readthedown
+---
+
+```{=html}
+<style>
+#content pre, #content code, pre {
+  max-height: 330px;
+  overflow-y: auto;
+}
+
+#content p {
+  text-align: justify !important;
+}
+</style>
+```
+
+# **LIBRARY**
+
+```{r, message=FALSE, warning=FALSE}
+library(survival)
+library(survMisc)
+library(CoxR2)
+library(survminer)
+library(readxl)
+library(MASS)
+library(dplyr)
+library(ggplot2)
+library(scales)
+library(patchwork)
+library(muhaz)
+```
+
+# **DATA**
+
+```{r, message=FALSE, warning=FALSE}
+data<- read.csv("C:/JOSHUA BRYAN WIJAYA/Semester 6/ADT/Tugas Akhir/Dataset/divorce_dataset.csv")
+```
+
+`dataset` yang digunakan dalam penelitian ini merupakan dataset *Marriage Dissolution in the U.S.* yang berisi informasi mengenai durasi pernikahan pasangan di Amerika Serikat hingga terjadinya perceraian atau penyensoran (*censoring*). `Dataset` bersumber dari *Princeton University*, terdiri atas 3371 amatan. Peubah dalam dataset ini terdiri atas:
+
+| Variabel | Deskripsi |
+|-------------------------|-----------------------------------------------|
+| `id` | Nomor identitas unik untuk setiap responden dalam dataset. |
+| `censor` | Indikator kejadian, bernilai 1 jika terjadi perceraian dan 0 jika data tersensor (tidak terjadi perceraian). |
+| `hiseduc` | Lama pendidikan suami dalam tahun pendidikan formal. |
+| `heblack` | Variabel indikator yang menunjukkan apakah suami merupakan African American atau bukan. |
+| `mixed` | Variabel indikator yang menunjukkan apakah pasangan memiliki etnis yang berbeda. |
+| `agediff` | Perbedaan usia antara suami dengan istri. |
+
+Peubah `mixed` merupakan peubah hasil *feature engineering* yang membandingkan ras suami dengan ras isteri. *mixed* = '1' jika etnis suami-istri berbeda, ='0' jika etnis suami-istri sama. Peubah `agediff` juga merupakan peubah numerik yang dikategorisasikan ke dalam 3 kategori, yaitu bila *agediff* $<-3$ , maka *OlderWife* (istri lebih tua), *agediff* = $-3<x<3$ berarti *peer* (sebaya), dan bila *agediff* $>3$ maka *OlderHusband* (suami lebih tua).
+
+```{r, message=FALSE, warning=FALSE}
+str(data)
+```
+
+masih terdapat beberapa peubah yang perlu diperbaiki tipe datanya. Peubah `heduc` , `heblack`, `mixed`, dan `agediff` merupakan peubah yang akan digunakan sebagai kovariat dalam penelitian ini dan perlu diubah menjadi faktor. Peubah `div` juga dalam beberapa kasus akan diubah sebagai faktor untuk keperluan eksplorasi data.
+
+```{r}
+sum(is.na(data$years))
+sum(is.na(data$div))
+```
+
+# **PRE-PROCESS DATA**
+
+```{r}
+data$heduc <- as.character(data$heduc)
+
+data$heduc[data$heduc == "15-Dec"] <- "12-15"
+
+data$heduc <- factor(
+  data$heduc,
+  levels = c("<12", "12-15", ">15")
+)
+```
+
+```{r, message=FALSE, warning=FALSE}
+data$heduc <- as.factor(data$heduc)
+data$agediff <- as.factor(data$agediff)
+data$heblack <- as.factor(data$heblack)
+data$mixed <- as.factor(data$mixed)
+data$div <- as.factor(data$div)
+summary(data)
+```
+
+Proses pertama, memperbaiki tipe data yang sebelumnya masih salah tentunya, serta mengkaji data secara deskriptif. Berdasarkan output di atas, mayoritas suami dalam basis data ini berada pada kelompok pendidikan menengah (`12-15` tahun) sebanyak 1.655 orang, berorientasi ras non-kulit hitam (`heblack` 0) sebanyak 2.626 orang, dan menjalani pernikahan sesama ras (`mixed` 0) sebanyak 2.730 pasangan. Untuk variabel perbedaan usia (`agediff`), sebagian besar pasangan diklasifikasikan sebagai pasangan sebaya atau berumur setara (*Peer*) dengan frekuensi mencapai 2.586 data, yang jauh mendominasi dibandingkan kategori suami lebih tua (*OlderHusband*: 621) maupun istri lebih tua (*olderWife*: 164). Dari sisi kejadian, tercatat sebanyak 1.032 pasangan mengalami peristiwa perceraian (`div` = 1), sementara 2.339 pengamatan lainnya berstatus tersensor (`div` = 0) karena tidak bercerai hingga akhir periode pemantauan studi.
+
+Dari aspek dimensi waktu analisis, durasi pernikahan subjek (`years`) memiliki rentang pengamatan yang sangat luas, dimulai dari waktu paling singkat sebesar 0.079 tahun (sekitar 1 bulan) hingga mencapai masa pernikahan terlama sepanjang 73.068 tahun. Nilai tengah atau median durasi pernikahan berada pada angka 14.497 tahun, yang berarti separuh dari total pasangan di dalam data mengalami perceraian atau tersensor sebelum usia pernikahan mencapai sekitar 14.5 tahun, sementara separuh sisanya bertahan melampaui waktu tersebut. Distribusi variabel waktu ini juga menunjukkan kemiringan positif (*positive skewness*), di mana nilai rata-rata (*mean*) sebesar 18.410 tahun ditarik menjadi lebih tinggi daripada nilai mediannya akibat pengaruh keberadaan beberapa pasangan yang memiliki usia pernikahan sangat panjang di atas nilai kuartil ketiga (`3rd Qu.` = 26.141 tahun).
+
+# **EKSPLORASI DATA**
+
+## Event vs Not Event serta Hubungan Waktu Pernikahan terhadap Kasus Perceraian
+
+```{r, message=FALSE, warning=FALSE}
+hist_data <- data %>% filter(div == 1)
+
+plot_hist <- ggplot(hist_data, aes(x = years)) +
+  geom_histogram(binwidth = 5, fill = "#FFC30B", color = "black", boundary = 0) +
+  coord_cartesian(xlim = c(0, 60), ylim = c(0, 350)) +
+  
+  facet_wrap(~ "Histogram Perceraian vs Umur Pernikahan") +
+  labs(
+    x = "Umur Pernikahan",
+    y = "Kasus Perceraian"
+  ) +
+  
+  theme_bw(base_size = 11) +
+  theme(
+    strip.background = element_rect(fill = "#2c7fb8", color = "#2c7fb8"),
+    strip.text = element_text(color = "white", face = "bold", size = 11),
+    axis.title = element_text(face = "bold", size = 11),
+    axis.text = element_text(size = 10),
+    panel.grid.major = element_line(color = "white"),
+    panel.grid.minor = element_line(color = "white")
+  )
+
+
+pie_data <- data %>%
+  count(div) %>%
+  mutate(
+    percentage = n / sum(n),
+    label_text = paste0(n, "\n (", percent(percentage, accuracy = 0.1), ")")
+  )
+
+plot_pie <- ggplot(pie_data, aes(x = "", y = n, fill = factor(div))) +
+  geom_bar(stat = "identity", width = 1, color = "white", size = 1) +
+  coord_polar("y", start = 0) +
+  
+  geom_text(
+    aes(label = label_text), 
+    position = position_stack(vjust = 0.5), 
+    color = "white", fontface = "bold", size = 3.5
+  ) +
+  
+  facet_wrap(~ "Proporsi Variabel Divorced (div)") +
+  scale_fill_manual(
+    values = c("0" = "#377EB8", "1" ="#E41A1C"),
+    labels = c("0" = "Censoring (0)", "1" = "Divorce (1)"),
+    name = "Status (div):"
+  ) +
+  
+  labs(x = NULL, y = NULL) +
+  
+  theme_bw(base_size = 11) +
+  theme(
+    strip.background = element_rect(fill = "#2c7fb8", color = "#2c7fb8"),
+    strip.text = element_text(color = "white", face = "bold", size = 11),
+    panel.grid.major = element_line(color = "grey92"),
+    panel.grid.minor = element_line(color = "grey96"),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold")
+  )
+
+final_figure <- plot_hist + plot_pie
+print(final_figure)
+```
+
+Visualisasi di atas menunjukkan bahwa mayoritas pasangan di dalam data mengalami peristiwa perceraian (*divorce*), yaitu sebesar 30.6% (1.032 kasus), sementara 69.4% (2.339 pengamatan) sisanya berstatus tersensor (*censoring*) karena tetap bertahan atau keluar dari periode pengamatan. Berdasarkan grafik histogram, distribusi kasus perceraian menunjukkan pola (*right-skewed distribution*). Frekuensi perceraian berada pada titik tertinggi pada dua dekade pertama pernikahan (rentang 0 hingga 20 tahun) dengan akumulasi lebih dari 300 kasus di tiap interval awal, lalu menyusut secara bertahap hingga menyentuh angka terendah pada usia pernikahan di atas 60 tahun. Pola ini mengindikasikan secara kuat bahwa **risiko terjadinya perceraian paling rentan dan kritis terjadi pada masa-masa awal pernikahan**, dan peluang daya tahan pasangan untuk mempertahankan hubungan akan **semakin stabil dan menguat apabila mereka berhasil melewati fase dua puluh tahun pertama**.
+
+## Boxplot Hubungan pernikahan terhadap kasus perceraian
+
+```{r, message=FALSE, warning=FALSE}
+plot_box <- ggplot(data, aes(x = factor(div), y = years, fill = factor(div))) +
+  geom_boxplot(color = "grey30", alpha = 0.8, width = 0.6) +
+  facet_wrap(~ "Perbandingan boxplot kasus perceraian") +
+  
+  labs(
+    x = "Kejadian: 0 - Tidak bercerai, 1 - bercerai",
+    y = "Umur pernikahan"
+  ) +
+  
+  scale_fill_manual(
+    values = c("0" = "#377EB8", "1" = "#E41A1C"),
+    labels = c("0" = "Tidak Bercerai", "1" = "Bercerai"),
+    name = "Status (div):"
+  ) +
+  
+  theme_bw(base_size = 11) +
+  theme(
+    strip.background = element_rect(fill = "#2c7fb8", color = "#2c7fb8"),
+    strip.text = element_text(color = "white", face = "bold", size = 11),
+    
+    axis.title = element_text(face = "bold", size = 11),
+    axis.text = element_text(size = 10),
+    
+    panel.grid.major = element_line(color = "grey92"),
+    panel.grid.minor = element_line(color = "grey96"),
+    
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold")
+  )
+
+print(plot_box)
+```
+
+```{r}
+tabel_outlier <- data %>%
+  group_by(div) %>%
+  filter(years < quantile(years, 0.25) - 1.5 * IQR(years) | 
+         years > quantile(years, 0.75) + 1.5 * IQR(years)) %>%
+  select(div, years) %>%
+  arrange(div, desc(years))
+
+print(tabel_outlier, n = Inf)
+```
+
+Grafik boxplot menunjukkan perbedaan distribusi umur pernikahan yang logis di mana kelompok yang tidak bercerai (`div` = 0) memiliki nilai tengah (median) jauh lebih tinggi ($\pm19$ tahun) dengan sebaran kotak (IQR) yang membentang luas hingga 33 tahun, mencerminkan karakteristik pasangan yang terus bertahan seiring berjalannya waktu pengamatan. Sebaliknya, kelompok pasangan yang bercerai (`div` = 1) memiliki median umur pernikahan yang jauh lebih rendah (di bawah 10 tahun) dengan kotak distribusi terkonsentrasi di area bawah, mengonfirmasi bahwa peristiwa perceraian dalam populasi ini paling rentan terjadi pada dekade pertama pernikahan. Berdasarkan tabel pencilan, kelompok bercerai memunculkan 21 data outlier positif pada rentang 32.2 hingga 50.4 tahun yang merepresentasikan kasus perceraian langka di usia pernikahan tua (*late-life divorce*). Sementara itu, kelompok tidak bercerai memunculkan satu pencilan tunggal yang sangat ekstrem di angka 73.1 tahun, yang secara fisis merupakan representasi asli dari pasangan super tangguh dengan masa daya tahan terpanjang yang sukses mempertahankan pernikahan mereka hingga akhir periode studi (*long surviving couples*).
+
+## Edukasi Pria
+
+```{r, message=FALSE, warning=FALSE}
+
+# Stacked Bar Chart
+data_clean <- data %>%
+  mutate(heduc = factor(heduc, levels = c("<12", "12-15", ">15")))
+
+
+data_stacked <- data_clean %>%
+  count(heduc, div) %>%
+  group_by(heduc) %>%
+  mutate(
+    percentage = n / sum(n),
+    div = factor(div, levels = c(0, 1), labels = c("Tidak Bercerai", "Bercerai"))
+  ) %>%
+  ungroup()
+
+plot1_bar <- ggplot(data_stacked, aes(x = heduc, y = percentage, fill = div)) +
+  geom_col(color = "black", alpha = 0.8, width = 0.5) +
+  geom_text(
+    aes(label = percent(percentage, accuracy = 0.1)), 
+    position = position_stack(vjust = 0.5), 
+    fontface = "bold", color = "white", size = 3.5
+  ) +
+  scale_y_continuous(labels = percent) +
+  scale_fill_manual(
+    values = c("Tidak Bercerai" = "#377EB8", "Bercerai" = "#E41A1C"),
+    name = "Status (div):"
+  ) +
+  facet_wrap(~ "Proporsi Status Pernikahan") +
+  labs(x = "Tingkat Pendidikan Suami", y = "Persentase") +
+  theme_bw(base_size = 11) +
+  theme(
+    strip.background = element_rect(fill = "#2c7fb8", color = "#2c7fb8"),
+    strip.text = element_text(color = "white", face = "bold", size = 11),
+    axis.title = element_text(face = "bold", size = 11),
+    axis.text = element_text(size = 10),
+    panel.grid.major = element_line(color = "grey92"),
+    panel.grid.minor = element_line(color = "grey96"),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold")
+  )
+
+
+# Boxplot
+plot2_box <- ggplot(data_clean, aes(x = heduc, y = years, fill = factor(div))) +
+  geom_boxplot(color = "grey30", alpha = 0.8, width = 0.6) +
+  scale_fill_manual(
+    values = c("0" = "#377EB8", "1" = "#E41A1C"),
+    labels = c("0" = "Tidak Bercerai", "1" = "Bercerai"),
+    name = "Status (div):"
+  ) +
+  facet_wrap(~ "Durasi Pernikahan (Tahun)") +
+  labs(x = "Tingkat Pendidikan Suami", y = "Usia Pernikahan (Tahun)") +
+  theme_bw(base_size = 11) +
+  theme(
+    strip.background = element_rect(fill = "#2c7fb8", color = "#2c7fb8"),
+    strip.text = element_text(color = "white", face = "bold", size = 11),
+    axis.title = element_text(face = "bold", size = 11),
+    axis.text = element_text(size = 10),
+    panel.grid.major = element_line(color = "grey92"),
+    panel.grid.minor = element_line(color = "white"),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold")
+  )
+
+
+
+final_comparison_plot <- (plot1_bar + plot2_box) + 
+  plot_layout(guides = "collect") & 
+  theme(legend.position = "bottom")
+
+print(final_comparison_plot)
+```
+
+Berdasarkan *stacked bar chart* di sisi kiri, kelompok suami dengan tingkat pendidikan menengah (`12–15` tahun) memiliki persentase perceraian (*divorce*) tertinggi yaitu sebesar 32.0%, diikuti oleh kelompok pendidikan rendah (`<12` tahun) sebesar 30.5%, dan kelompok pendidikan tinggi (`>15` tahun) yang justru memiliki proporsi perceraian paling rendah yaitu sebesar 25.7%. Di lain sisi, grafik *boxplot* di sisi kanan mengonfirmasi bahwa pada ketiga tingkat pendidikan, pasangan yang tidak bercerai (biru) secara konsisten memiliki nilai tengah (*median*) umur pernikahan yang jauh lebih lama dibandingkan kelompok yang bercerai (merah). Pada kelompok pasangan yang bertahan atau tidak bercerai, suami dengan tingkat pendidikan rendah (`<12` tahun) mencatatkan median durasi pernikahan terpanjang (mencapai sekitar 24 tahun) dengan sebaran kotak yang paling tinggi ke atas, sementara kelompok berpendidikan tinggi (`>15` tahun) memiliki median durasi pernikahan bertahan yang sedikit lebih rendah, namun memiliki sebaran titik pencilan (*outliers*) positif yang konsisten menunjukkan adanya hubungan pernikahan yang sukses berjalan hingga usia tua (40–60 tahun).
+
+## Nigga atau bukan
+
+```{r}
+data_black_clean <- data %>%
+  mutate(heblack = factor(heblack, levels = c(0, 1), labels = c("Non-Black", "Black")))
+
+data_stacked_black <- data_black_clean %>%
+  count(heblack, div) %>%
+  group_by(heblack) %>%
+  mutate(
+    percentage = n / sum(n),
+    div = factor(div, levels = c(0, 1), labels = c("Tidak Bercerai", "Bercerai"))
+  ) %>%
+  ungroup()
+
+plot1_bar_black <- ggplot(data_stacked_black, aes(x = heblack, y = percentage, fill = div)) +
+  geom_col(color = "black", alpha = 0.8, width = 0.5) +
+  geom_text(
+    aes(label = percent(percentage, accuracy = 0.1)), 
+    position = position_stack(vjust = 0.5), 
+    fontface = "bold", color = "white", size = 3.5
+  ) +
+  scale_y_continuous(labels = percent) +
+  scale_fill_manual(
+    values = c("Tidak Bercerai" = "#377EB8", "Bercerai" = "#E41A1C"),
+    name = "Status (div):"
+  ) +
+  facet_wrap(~ "Proporsi Status Pernikahan") +
+  labs(x = "Ras Suami (heblack)", y = "Persentase") +
+  theme_bw(base_size = 11) +
+  theme(
+    strip.background = element_rect(fill = "#2c7fb8", color = "#2c7fb8"),
+    strip.text = element_text(color = "white", face = "bold", size = 11),
+    axis.title = element_text(face = "bold", size = 11),
+    axis.text = element_text(size = 10),
+    panel.grid.major = element_line(color = "grey92"),
+    panel.grid.minor = element_line(color = "grey96")
+  )
+
+plot2_box_black <- ggplot(data_black_clean, aes(x = heblack, y = years, fill = factor(div))) +
+  geom_boxplot(color = "grey30", alpha = 0.8, width = 0.5) +
+  # Sesuai aturan: 0 = Biru, 1 = Merah
+  scale_fill_manual(
+    values = c("0" = "#377EB8", "1" = "#E41A1C"),
+    labels = c("0" = "Tidak Bercerai", "1" = "Bercerai"),
+    name = "Status (div):"
+  ) +
+  facet_wrap(~ "Durasi Pernikahan (Tahun)") +
+  labs(x = "Ras Suami (heblack)", y = "Usia Pernikahan (Tahun)") +
+  theme_bw(base_size = 11) +
+  theme(
+    strip.background = element_rect(fill = "#2c7fb8", color = "#2c7fb8"),
+    strip.text = element_text(color = "white", face = "bold", size = 11),
+    axis.title = element_text(face = "bold", size = 11),
+    axis.text = element_text(size = 10),
+    panel.grid.major = element_line(color = "grey92"),
+    panel.grid.minor = element_line(color = "grey96")
+  )
+
+final_black_comparison <- (plot1_bar_black + plot2_box_black) + 
+  plot_layout(guides = "collect") & 
+  theme(legend.position = "bottom")
+
+# Tampilkan ke layar
+print(final_black_comparison)
+```
+
+Berdasarkan *stacked bar chart* di sisi kiri, persentase kejadian perceraian (*divorce*) antara kedua kelompok ras suami menunjukkan angka yang relatif berimbang, di mana kelompok suami kulit hitam (*Black*) memiliki proporsi cerai sedikit lebih tinggi sebesar 30.9% dibandingkan kelompok *Non-kulit hitam* yang berada di angka 30.5%. Meskipun proporsi kejadiannya mirip, grafik *boxplot* di sisi kanan menunjukkan perbedaan sebaran durasi waktu yang cukup kontras antara kedua kelompok tersebut. Pada kategori pasangan yang tidak bercerai (biru), kelompok suami *Non-Black* memiliki nilai tengah (*median*) umur pernikahan yang lebih lama (mencapai sekitar 20 tahun) dan rentang kotak yang lebih tinggi ke atas dibandingkan kelompok *Black* yang median survivalnya berada di kisaran 13 tahun. Sementara itu, untuk pasangan yang mengalami perceraian (merah), kedua kelompok ras secara konsisten menunjukkan pola yang serupa dengan nilai median perceraian yang menumpuk di bawah 10 tahun pernikahan, ditandai dengan sebaran titik pencilan (*outliers*) positif di kedua kelompok yang merepresentasikan kasus-kasus perceraian langka pada usia pernikahan matang (30 hingga 50 tahun).
+
+## Pernikahan antar ras vs sesama ras
+
+```{r}
+data_mixed_clean <- data %>%
+  mutate(mixed = factor(mixed, levels = c(0, 1), labels = c("Same Race", "Mixed Race")))
+
+data_stacked_mixed <- data_mixed_clean %>%
+  count(mixed, div) %>%
+  group_by(mixed) %>%
+  mutate(
+    percentage = n / sum(n),
+    div = factor(div, levels = c(0, 1), labels = c("Tidak Bercerai", "Bercerai"))
+  ) %>%
+  ungroup()
+
+plot1_bar_mixed <- ggplot(data_stacked_mixed, aes(x = mixed, y = percentage, fill = div)) +
+  geom_col(color = "black", alpha = 0.8, width = 0.5) +
+  geom_text(
+    aes(label = percent(percentage, accuracy = 0.1)), 
+    position = position_stack(vjust = 0.5), 
+    fontface = "bold", color = "white", size = 3.5
+  ) +
+  scale_y_continuous(labels = percent) +
+  # Sesuai aturan: Tidak Bercerai = Biru, Bercerai = Merah
+  scale_fill_manual(
+    values = c("Tidak Bercerai" = "#377EB8", "Bercerai" = "#E41A1C"),
+    name = "Status (div):"
+  ) +
+  facet_wrap(~ "Proporsi Status Pernikahan") +
+  labs(x = "Tipe Pernikahan (mixed)", y = "Persentase") +
+  theme_bw(base_size = 11) +
+  theme(
+    strip.background = element_rect(fill = "#2c7fb8", color = "#2c7fb8"),
+    strip.text = element_text(color = "white", face = "bold", size = 11),
+    axis.title = element_text(face = "bold", size = 11),
+    axis.text = element_text(size = 10),
+    panel.grid.major = element_line(color = "grey92"),
+    panel.grid.minor = element_line(color = "grey96")
+  )
+
+plot2_box_mixed <- ggplot(data_mixed_clean, aes(x = mixed, y = years, fill = factor(div))) +
+  geom_boxplot(color = "grey30", alpha = 0.8, width = 0.5) +
+  # Sesuai aturan: 0 = Biru, 1 = Merah
+  scale_fill_manual(
+    values = c("0" = "#377EB8", "1" = "#E41A1C"),
+    labels = c("0" = "Tidak Bercerai", "1" = "Bercerai"),
+    name = "Status (div):"
+  ) +
+  facet_wrap(~ "Durasi Pernikahan (Tahun)") +
+  labs(x = "Tipe Pernikahan (mixed)", y = "Usia Pernikahan (Tahun)") +
+  theme_bw(base_size = 11) +
+  theme(
+    strip.background = element_rect(fill = "#2c7fb8", color = "#2c7fb8"),
+    strip.text = element_text(color = "white", face = "bold", size = 11),
+    axis.title = element_text(face = "bold", size = 11),
+    axis.text = element_text(size = 10),
+    panel.grid.major = element_line(color = "grey92"),
+    panel.grid.minor = element_line(color = "grey96")
+  )
+
+final_mixed_comparison <- (plot1_bar_mixed + plot2_box_mixed) + 
+  plot_layout(guides = "collect") & 
+  theme(legend.position = "bottom")
+
+# Tampilkan grafik ke layar
+print(final_mixed_comparison)
+```
+
+Berdasarkan *stacked bar chart* di sisi kiri, pasangan dengan tipe pernikahan antar-ras (*Mixed Race*) memiliki persentase perceraian (*divorce*) yang lebih tinggi, yaitu sebesar 36.7%, dibandingkan dengan pasangan sesama ras (*Same Race*) yang berada di angka 29.2%. Sementara itu, grafik *boxplot* di sisi kanan menunjukkan pola sebaran durasi waktu daya tahan yang relatif serupa antara kedua kelompok tipe pernikahan tersebut. Pada kategori pasangan yang tidak bercerai (biru), baik kelompok *Same Race* maupun *Mixed Race* secara konsisten memiliki nilai tengah (*median*) umur pernikahan yang sama panjang, yakni berada di kisaran 19 tahun, dengan rentang sebaran kotak (IQR) yang juga berhimpitan secara seimbang. Demikian pula pada kategori pasangan yang mengalami perceraian (merah), kedua kelompok mencatatkan median waktu perceraian yang serupa di bawah usia 10 tahun pernikahan, yang mengindikasikan bahwa meskipun pernikahan antar-ras memiliki risiko proporsi kejadian cerai yang lebih besar secara akumulatif, fase kritis runtuhnya hubungan pada kedua kelompok tetap dominan terkonsentrasi pada dekade awal pernikahan mereka.
+
+## **Gap Usia Pernikahan**
+
+```{r}
+data_agediff_clean <- data %>%
+  mutate(agediff = factor(agediff, 
+                          levels = c("Peer", "OlderHusband", "OlderWife"), 
+                          labels = c("Peer", "Older Husband", "Older Wife")))
+
+# Stacked Bar Chart
+data_stacked_agediff <- data_agediff_clean %>%
+  count(agediff, div) %>%
+  group_by(agediff) %>%
+  mutate(
+    percentage = n / sum(n),
+    div = factor(div, levels = c(0, 1), labels = c("Tidak Bercerai", "Bercerai"))
+  ) %>%
+  ungroup()
+
+plot1_bar_agediff <- ggplot(data_stacked_agediff, aes(x = agediff, y = percentage, fill = div)) +
+  geom_col(color = "black", alpha = 0.8, width = 0.5) +
+  geom_text(
+    aes(label = percent(percentage, accuracy = 0.1)), 
+    position = position_stack(vjust = 0.5), 
+    fontface = "bold", color = "white", size = 3.5
+  ) +
+  scale_y_continuous(labels = percent) +
+  scale_fill_manual(
+    values = c("Tidak Bercerai" = "#377EB8", "Bercerai" = "#E41A1C"),
+    name = "Status (div):"
+  ) +
+  facet_wrap(~ "Proporsi Status Pernikahan") +
+  labs(x = "Perbedaan Usia Pasangan (agediff)", y = "Persentase") +
+  theme_bw(base_size = 11) +
+  theme(
+    strip.background = element_rect(fill = "#2c7fb8", color = "#2c7fb8"),
+    strip.text = element_text(color = "white", face = "bold", size = 11),
+    axis.title = element_text(face = "bold", size = 11),
+    axis.text = element_text(size = 10),
+    panel.grid.major = element_line(color = "grey92"),
+    panel.grid.minor = element_line(color = "grey96")
+  )
+
+# Boxplot
+plot2_box_agediff <- ggplot(data_agediff_clean, aes(x = agediff, y = years, fill = factor(div))) +
+  geom_boxplot(color = "grey30", alpha = 0.8, width = 0.5) +
+  scale_fill_manual(
+    values = c("0" = "#377EB8", "1" = "#E41A1C"),
+    labels = c("0" = "Tidak Bercerai", "1" = "Bercerai"),
+    name = "Status (div):"
+  ) +
+  facet_wrap(~ "Durasi Pernikahan (Tahun)") +
+  labs(x = "Perbedaan Usia Pasangan (agediff)", y = "Usia Pernikahan (Tahun)") +
+  theme_bw(base_size = 11) +
+  theme(
+    strip.background = element_rect(fill = "#2c7fb8", color = "#2c7fb8"),
+    strip.text = element_text(color = "white", face = "bold", size = 11),
+    axis.title = element_text(face = "bold", size = 11),
+    axis.text = element_text(size = 10),
+    panel.grid.major = element_line(color = "grey92"),
+    panel.grid.minor = element_line(color = "grey96")
+  )
+
+final_agediff_comparison <- (plot1_bar_agediff + plot2_box_agediff) + 
+  plot_layout(guides = "collect") & 
+  theme(legend.position = "bottom")
+print(final_agediff_comparison)
+```
+
+Berdasarkan *stacked bar chart* di sisi kiri, pasangan dengan usia setara (*Peer*) mencatatkan persentase perceraian (*divorce*) tertinggi sebesar 33.4%, diikuti oleh kelompok istri lebih tua (*Older Wife*) sebesar 22.6%, dan kelompok suami lebih tua (*Older Husband*) dengan tingkat perceraian terendah sebesar 21.1%. Grafik *boxplot* di sisi kanan secara konsisten mengonfirmasi bahwa pada ketiga kategori perbedaan usia, kelompok pasangan yang tidak bercerai (biru) memiliki nilai tengah (*median*) umur pernikahan yang jauh lebih lama dibandingkan kelompok yang bercerai (merah). **Kami menemukan bahwa pasangan sebaya (*Peer*) memiliki kerentanan paling tinggi untuk bercerai, namun di sisi lain, kelompok *Peer* yang berhasil bertahan memiliki median waktu daya tahan terlama (mencapai kisaran 20 tahun) dan batas atas sebaran paling tinggi.** Sebaliknya, pasangan dengan kategori istri lebih tua (*Older Wife*) menunjukkan dinamika yang unik; kelompok ini memiliki persentase tidak bercerai yang cukup tinggi (77.4%), tetapi secara konsisten mencatatkan median durasi pernikahan terpendek, baik pada subjek yang tidak bercerai (median sekitar 9 tahun) maupun pada subjek yang pada akhirnya mengalami perceraian (median sekitar 6 tahun).
+
+# **MODEL TANPA KOVARIAT**
+
+## Kaplan Meier
+
+```{r}
+data$div <- as.numeric(as.character(data$div))
+surv_obj <- Surv(
+  time = data$years,
+  event = data$div
+)
+```
+
+```{r}
+km = survfit(Surv(years, div) ~ 1, conf.type="plain", data=data)
+#summary(km)
+plot(km, xlim= c(0,70))
+```
+
+## Fungsi Hazard
+
+```{r}
+haz_fit <- muhaz(
+  data$years,
+  data$div
+)
+
+plot(
+  haz_fit,
+  main = "Hazard Function Plot",
+  xlab = "Time",
+  ylab = "Hazard"
+)
+```
+
+## Kumulatif Hazard
+
+```{r}
+plot(km, xlim= c(0,70), fun="cumhaz",xlab="Time", ylab="Cumulative hazard")
+lines(km, fun="cumhaz",col="blue")
+```
+
+Dari paling atas, terdapat estimasi fungsi daya tahan, laju risiko (*hazard function*), dan akumulasi risiko (*cumulative hazard*) untuk model tanpa kovariat dari data pernikahan. Berdasarkan kurva Kaplan-Meier pada gambar pertama, peluang daya tahan pasangan untuk mempertahankan pernikahan terus menurun secara konstan sejak tahun pertama hingga memasuki tahun ke-30 pernikahan, di mana probabilitasnya menyusut dari 1.00 hingga tersisa di $\pm0.60$. Setelah melewati fase tiga dekade tersebut ($years>30$) kurva mulai bergerak mendatar dan stabil pada nilai probabilitas sekitar 0.55 hingga akhir masa pemantauan di tahun ke-70. Pola melandai ini sejalan dengan grafik *cumulative hazard* pada gambar ketiga yang menunjukkan akumulasi risiko perceraian tumbuh cepat di awal dan mulai mengalami kejenuhan (*flattening*) setelah tahun ke-40 pada nilai indeks sekitar 0.58, menegaskan bahwa mayoritas perceraian terjadi di paruh awal masa pengamatan (30-40 tahun pertama) dan menyisakan populasi tangguh yang tidak lagi mengalami kejadian cerai di masa tua.
+
+Dinamika risiko perceraian secara lebih spesifik digambarkan oleh *Hazard Function Plot* pada gambar kedua yang menunjukkan pola non-monoton berbentuk *unimodal/bell-shaped*. Laju risiko perceraian harian tidak langsung berada di titik tertinggi pada awal pernikahan, melainkan memuncak secara tajam terlebih dahulu pada rentang tahun ke-5 hingga ke-7 pernikahan dengan nilai laju risiko sebesar 0.022. Setelah melewati masa puncak kritis yang sering dikenal sebagai fase adaptasi awal tersebut, laju risiko perceraian menurun secara konsisten dan stabil mendekati angka nol pada usia pernikahan di atas 40 tahun. **Pola pergerakan *hazard* yang naik lalu turun ini secara metodologis mengonfirmasi bahwa distribusi log-logistic atau log-normal parametrik berbasis *Accelerated Failure Time* (AFT) akan jauh lebih adaptif dan akurat untuk memodelkan data daya tahan pernikahan ini dibandingkan dengan model berbasis laju monoton seperti fungsi eksponensial atau Weibull**.
+
+# **KURVA KAPLAN MEIER MODEL KOVARIAT**
+
+## Tingkat Pendidikan Suami
+
+```{r}
+km = survfit(Surv(years, div) ~ heduc, conf.type="plain", data=data)
+#summary(km)
+plot(km, xlim= c(0,70), col=c("green","red","blue"))
+legend("topright", c("<12 years", "12-15 years"," >15 years"),
+       lty=1, col=c("green","blue","red"),bty="c")
+```
+
+Kurva Kaplan-Meier di atas menunjukkan bahwa kelompok suami dengan tingkat pendidikan tertinggi (`>15 years` / garis merah) secara konsisten memiliki peluang daya tahan pernikahan yang paling rendah sepanjang 70 tahun masa pemantauan, di mana kurvanya berada di posisi paling bawah dibandingkan kategori lainnya. Penurunan paling curam pada ketiga kelompok terjadi pada tiga dekade pertama pernikahan, lalu mulai bergerak mendatar (*plateau*) dan stabil setelah melewati usia pernikahan 35 tahun yang menandakan berkurangnya risiko perceraian di masa tua. Pada fase jenuh tersebut, peluang pernikahan untuk tetap bertahan pada kelompok suami berpendidikan tinggi menetap di angka sekitar 50%, sedangkan kelompok suami berpendidikan menengah (`12-15 years` / garis biru) dan rendah (`<12 years` / garis hijau) menunjukkan daya tahan yang lebih stabil dan saling berhimpitan erat dengan peluang bertahan hidup bersama mencapai angka sekitar 60% hingga akhir studi.
+
+## Nigga
+
+```{r}
+km = survfit(Surv(years, div) ~ heblack, conf.type="plain", data=data)
+#summary(km)
+plot(km, xlim= c(0,70), col=c("red","blue"))
+legend("topright", c("Otherwise", "Black"),
+       lty=1, col=c("red","blue"),bty="c")
+```
+
+Kurva Kaplan-Meier di atas menunjukkan bahwa kelompok suami berkulit hitam (`Black` / garis biru) secara konsisten memiliki peluang daya tahan pernikahan yang lebih rendah dibandingkan kelompok ras lainnya (`Otherwise` / garis merah) di sepanjang 70 tahun masa pemantauan. Penurunan kedua kurva terlihat cukup curam sejak awal pernikahan hingga memasuki tahun ke-30, yang mengindikasikan bahwa tiga dekade pertama merupakan fase dengan akumulasi kejadian perceraian tertinggi bagi kedua kelompok ras. Setelah melewati fase kritis tersebut, kedua kurva mulai bergerak melandai (*plateau*) dan stabil di mana peluang pasangan untuk tetap bertahan hidup bersama menetap di angka sekitar 58% untuk kelompok ras lainnya (merah), sedangkan kelompok suami berkulit hitam memiliki titik jenuh bertahan yang lebih rendah, yaitu berada di kisaran angka 45% hingga akhir periode pengamatan.
+
+## Pernikahan Silang Ras
+
+```{r}
+km = survfit(Surv(years, div) ~ mixed, conf.type="plain", data=data)
+#summary(km)
+plot(km,  xlim= c(0,70), col=c("red","blue"))
+legend("topright", c("Not mixed", "Mixed"),
+       lty=1, col=c("red","blue"),bty="c")
+```
+
+Kurva Kaplan-Meier di atas menunjukkan bahwa kelompok pasangan yang memiliki tipe pernikahan antar-ras (`Mixed Race` / garis biru) secara konsisten memiliki peluang daya tahan pernikahan yang lebih rendah dibandingkan kelompok pasangan sesama ras (`Same Race` / garis merah) di sepanjang 70 tahun masa pemantauan. Penurunan paling signifikan dan curam pada kedua kurva terkonsentrasi pada tiga dekade pertama pernikahan, yang mengindikasikan adanya akumulasi risiko perceraian yang tinggi di fase-fase awal hubungan bagi kedua kelompok. Setelah melewati usia pernikahan 35 tahun, kedua grafik bergerak melandai (*plateau*) dan mencapai titik jenuh stabil, di mana peluang pasangan untuk tetap bertahan hidup bersama menetap di angka sekitar 60% untuk kelompok *Same Race*, sedangkan kelompok *Mixed Race* menunjukkan batas pertahanan yang lebih rendah dengan peluang bertahan di kisaran angka 48% hingga akhir masa pengamatan.
+
+## Gap Umur Pasangan
+
+```{r}
+km = survfit(Surv(years, div) ~ agediff, conf.type="plain", data=data)
+#summary(km)
+plot(km, xlim= c(0,70), col=c("green","red","blue"))
+legend("topright", c("OlderHusband", "OlderWife"," Peer"),
+       lty=1, col=c("green","blue","red"),bty="c")
+```
+
+Kurva Kaplan-Meier di atas menunjukkan perbandingan peluang daya tahan pernikahan berdasarkan perbedaan usia pasangan selama 70 tahun masa pemantauan. Secara umum, kelompok suami lebih tua (`OlderHusband` / garis hijau) secara konsisten mendominasi posisi teratas dengan peluang daya tahan pernikahan paling stabil dan tertinggi, hingga mencapai titik jenuh mendatar (*plateau*) di angka sekitar 70% setelah tahun ke-30. Sebaliknya, kelompok istri lebih tua (`OlderWife` / garis biru) dan usia setara (`Peer` / garis merah) memiliki kurva yang saling berhimpitan di posisi bawah dengan peluang bertahan hidup bersama yang lebih rendah, yaitu menetap di kisaran angka 52% hingga 55% di masa pernikahan tua. **Temuan menarik dari grafik ini memperlihatkan fenomena persilangan kurva (*crossing survival curves*), di mana pada 10 tahun pertama pernikahan, kelompok sebaya (`Peer`) memiliki penurunan peluang bertahan yang paling agresif dan berada di posisi terbawah, tetapi setelah melewati masa pernikahan 15 tahun, posisi terbawah tersebut secara perlahan diambil alih oleh kelompok `OlderWife` hingga akhir masa pengamatan.**
+
+# **UJI LOG RANK MODEL KOVARIAT**
+
+### Taraf Nyata
+
+$$\alpha = 0.05$$
+
+### Hipotesis Uji
+
+-   **Hipotesis Nol (**$H_0$): $$H_0: S_1(t) = S_2(t) = \dots = S_k(t)$$ *(Tidak ada perbedaan kurva daya tahan pernikahan yang signifikan antar-kelompok/kategori yang diuji)*
+
+-   **Hipotesis Alternatif (**$H_1$): $$H_1: \text{Minimal ada satu nilai } i \text{ dan } j \text{ di mana } S_i(t) \neq S_j(t) \text{ untuk } i \neq j$$ *(Minimal ada satu kelompok yang memiliki kurva daya tahan pernikahan yang berbeda secara signifikan dari kelompok lainnya)*
+
+## Tingkat Pendidikan Suami
+
+```{r}
+survdiff(Surv(years, div) ~ heduc,rho=0,data=data)
+```
+
+## Nigga
+
+```{r}
+survdiff(Surv(years, div) ~ heblack,rho=0,data=data)
+```
+
+## Pernikahan Silang Ras
+
+```{r}
+survdiff(Surv(years, div) ~ mixed,rho=0,data=data)
+```
+
+## Gap Usia Pasangan
+
+```{r}
+survdiff(Surv(years, div) ~ agediff,rho=0,data=data)
+```
+
+Hasil uji *Log-Rank* (`survdiff`) untuk keempat kovariat menunjukkan perbedaan terhadap peluang daya tahan pernikahan pada setiap levelnya, karena seluruh nilai *p-value* berada jauh di bawah taraf nyata 5% ($\alpha = 0.05$). Pada variabel pendidikan suami (`heduc`, $p = 0.0002$) dan ras suami (`heblack`, $p = 0.003$), penolakan terhadap asumsi kesamaan kurva mengindikasikan adanya perbedaan kurva daya tahan yang nyata antar-kelompok strata sosial tersebut. Hal serupa ditemukan pada variabel tipe pernikahan (`mixed`, $p = 0.0008$) dan perbedaan usia pasangan (`agediff`, $p = 0.00003$), di mana nilai uji Chi-Square yang tinggi (masing-masing sebesar 11.3 dan 20.8). Pada dasarnya, hal ini menunjukkan bahwa keempat kovariat dapat menyebabkan perubahan pada estimasi kurva daya tahan.
+
+# **UJI ASUMSI PH**
+
+salah satu syarat utama model Cox Proportional Hazards maupun log-hazard adalah pemisahan kurva yang konstan secara paralel tanpa adanya persilangan. Dampak dari pelanggaran ini menandakan bahwa rasio risiko (*hazard ratio*) antar-kelas di tiap-tiap kovariat bersifat tidak bersifat konstan seiring berjalannya waktu, sehingga pemodelan parametrik seperti *log-logistik* *Accelerated Failure Time* (AFT) atau penggunaan Cox model dengan kovariat dependen-waktu (*Stratified Cox Model*) akan menjadi opsi alternatif yang jauh lebih valid.
+
+Untuk menguji asumsi *Proportional Hazards* secara formal pada model Cox, dilakukan analisis berbasis **Residual Schoenfeld yang Diskala (*Scaled Schoenfeld Residuals*)** menggunakan fungsi `cox.zph()` di R. Uji ini mengevaluasi apakah koefisien regresi ($\beta$) bersifat konstan atau berubah seiring berjalannya waktu.
+
+### Taraf Nyata
+
+$$\alpha = 0.05$$
+
+### Hipotesis Uji
+
+-   **Hipotesis Nol (**$H_0$): $$H_0: \rho = 0$$ *(Asumsi Proportional Hazards terpenuhi, yang berarti laju risiko atau hazard ratio bersifat konstan seiring berjalannya waktu).*
+
+-   **Hipotesis Alternatif (**$H_1$): $$H_1: \rho \neq 0$$ *(Asumsi Proportional Hazards terlanggar, yang berarti laju risiko atau hazard ratio tidak konstan dan berubah seiring berjalannya waktu).*
+
+### Kriteria Pengambilan Keputusan
+
+-   Jika nilai $p\text{-value} \ge \alpha$ (0.05), maka **Gagal Tolak** $H_0$ (Asumsi PH terpenuhi).
+-   Jika nilai $p\text{-value} < \alpha$ (0.05), maka **Tolak** $H_0$ (Asumsi PH terlanggar).
+
+## Tingkat Pendidikan Suami
+
+```{r}
+plot(
+  survfit(
+    Surv(years, div) ~ heduc,
+    data = data
+  ),
+  col = c("black", "red","blue"),
+  fun = "cloglog",
+  xlab = "log(Time)",
+  ylab = "-log(-log(S(t)))",
+  main = "PH Assumption Plot"
+)
+
+legend(
+  "topleft",
+  legend = levels(data$heduc),
+  col = c("black", "red","blue"),
+  lty = 1
+)
+```
+
+Grafik *PH Assumption Plot* ($\log(-\log(S(t)))$ vs $\log(\text{Time})$) di atas menunjukkan bahwa asumsi Proportional Hazards (PH) untuk variabel tingkat pendidikan suami **kemungkinan besar terlanggar (tidak terpenuhi)**. Indikasi kuat ini terlihat dari adanya perpotongan garis (*crossing*) yang nyata antara kurva pendidikan rendah (`<12` / garis hitam) dan pendidikan menengah (`12-15` / garis merah) pada rentang waktu awal ($\log(\text{Time})$ sekitar 0.5 hingga 2.0), serta jarak antar-kurva yang tidak konsisten sejajar di sepanjang sumbu waktu pengamatan.
+
+## Nigga
+
+```{r}
+plot(
+  survfit(
+    Surv(years, div) ~ heblack,
+    data = data
+  ),
+  col = c("black", "red"),
+  fun = "cloglog",
+  xlab = "log(Time)",
+  ylab = "-log(-log(S(t)))",
+  main = "PH Assumption Plot"
+)
+
+legend(
+  "topleft",
+  legend = levels(data$heblack),
+  col = c("black", "red"),
+  lty = 1
+)
+```
+
+Grafik *PH Assumption Plot* ($\log(-\log(S(t)))$ vs $\log(\text{Time})$) untuk peubah ras suami (`heblack`) di atas menunjukkan bahwa asumsi Proportional Hazards (PH) **kemungkinan besar terlanggar kuat (tidak terpenuhi)**. Indikasi pelanggaran ini terlihat sangat jelas dari adanya beberapa titik perpotongan (*crossing*) yang berulang antara kurva `heblack = 0` (garis hitam) dan `heblack = 1` (garis merah), khususnya pada fase awal hingga menengah ($\log(\text{Time})$ antara 0.5 hingga 5.0), di mana kedua garis saling melilit dan bertukar posisi. Selain itu, jarak vertikal antar-kurva tidak menunjukkan pola paralel yang konstan di sepanjang sumbu waktu pengamatan.
+
+## Pernikahan Silang Ras
+
+```{r}
+plot(
+  survfit(
+    Surv(years, div) ~ mixed,
+    data = data
+  ),
+  col = c("black", "red"),
+  fun = "cloglog",
+  xlab = "log(Time)",
+  ylab = "-log(-log(S(t)))",
+  main = "PH Assumption Plot"
+)
+
+legend(
+  "topleft",
+  legend = levels(data$mixed),
+  col = c("black", "red"),
+  lty = 1
+)
+```
+
+Grafik *PH Assumption Plot* ($\log(-\log(S(t)))$ vs $\log(\text{Time})$) untuk peubah tipe pernikahan (`mixed`) di atas menunjukkan bahwa asumsi Proportional Hazards (PH) **terpenuhi dengan baik**. Penilaian ini didasarkan pada visualisasi kedua kurva, di mana kelompok pernikahan sesama ras (`mixed = 0` / garis hitam) dan pernikahan antar-ras (`mixed = 1` / garis merah) bergerak sejajar secara konsisten (*paralel*) di sepanjang sumbu waktu pengamatan tanpa adanya perpotongan garis. Karena jarak vertikal di antara kedua kurva ini relatif konstan dari awal ($\log(\text{Time}) = 0.5$) hingga akhir masa pemantauan.
+
+## Gap Usia Pasangan
+
+```{r}
+plot(
+  survfit(
+    Surv(years, div) ~ agediff,
+    data = data
+  ),
+  col = c("black", "red","blue"),
+  fun = "cloglog",
+  xlab = "log(Time)",
+  ylab = "-log(-log(S(t)))",
+  main = "PH Assumption Plot"
+)
+
+legend(
+  "topleft",
+  legend = levels(data$agediff),
+  col = c("black", "red","blue"),
+  lty = 1
+)
+```
+
+Grafik *PH Assumption Plot* ($\log(-\log(S(t)))$ vs $\log(\text{Time})$) untuk peubah perbedaan usia pasangan (`agediff`) di atas menunjukkan bahwa asumsi Proportional Hazards (PH) **kemungkinan besar terlanggar (tidak terpenuhi)**. Indikasi kuat pelanggaran ini ditunjukkan oleh kurva kelompok istri lebih tua (`OlderWife` / garis merah) dan kelompok usia setara (`Peer` / garis biru) yang saling berhimpitan sangat rapat serta berulang kali melakukan perpotongan (*crossing*), terutama pada fase awal hingga menengah ($\log(\text{Time})$ antara 0.5 hingga 5.0). Sementara itu, kurva kelompok suami lebih tua (`OlderHusband` / garis hitam) memang bergerak relatif paralel di bawah kedua kurva lainnya, tetapi karena adanya persilangan fatal pada dua kategori sebelumnya, syarat utama keidentikan rasio risiko yang konstan antar-kategori gagal terpenuhi secara utuh.
+
+```{r}
+Cox=coxph(Surv(years, div)~heduc+heblack+mixed+agediff,data=data)
+proportionality=cox.zph(Cox,transform="identity")
+print(proportionality)
+```
+
+Namun anehnya, saat dilakukan uji formal, hanya peubah `hedblack` yang terbukti melanggar asumsi PH dengan $p-value<\alpha$, hal ini juga yang menyebabkan, andaikata data dianalisis dengan model log-logistik, pendekatannya akan menggunakan AFT (pemodelannya bukan untuk waktu secara langsung, melainkan terhadap log dari waktu). **Tapi dari temuan ini, kami merumuskan dua metode yang paling mungkin untuk data dengan *hazard function* naik turun dan asumsi PH tidak terpenuhi, yakni menggunakan model AFT Log-logistik atau stratified Cox Model**.
+
+# **MODEL I: AFT LOG-LOGISTIK**
+
+## **Diagnostik Log-logistik**
+
+```{r}
+km_overall <- survfit(Surv(years, div) ~ 1, data = data)
+
+valid_idx <- km_overall$surv > 0 & km_overall$surv < 1
+t_aktual  <- km_overall$time[valid_idx]
+s_aktual  <- km_overall$surv[valid_idx]
+
+log_t_aktual  <- log(t_aktual)
+logit_f_aktual <- log((1 - s_aktual) / s_aktual)
+
+plot(log_t_aktual, logit_f_aktual, 
+     type = "p",
+     pch = 20,
+     col = "darkgray",
+     xlab = "log(t)", 
+     ylab = "logit(F(t)) = log(F(t)/S(t))",
+     main = "Diagnostik Log-Logistik")
+
+grid(lty = "dotted", col = "lightgray")
+fit_garis <- lm(logit_f_aktual ~ log_t_aktual)
+abline(fit_garis, col = "red", lty = 1, lwd = 2.5)
+p_estimasi <- round(coef(fit_garis)[2], 3)
+
+legend("topleft", 
+       legend = c(paste("Data Aktual (Titik Empiris)"), 
+                  paste("Garis Tren Linier (p =", p_estimasi, ")")), 
+       col = c("darkgray", "red"), 
+       lty = c(NA, 1), 
+       pch = c(20, NA), 
+       lwd = c(NA, 2.5), 
+       bty = "o", bg = "white")
+```
+
+Berdasarkan plot logit diagnostik, sebaran titik empiris data aktual (berwarna abu-abu) secara keseluruhan menunjukkan tren yang sangat konsisten menempel dan mengikuti jalur linear dari garis prediksi teoretis (berwarna merah). Kemiringan garis sebesar $p = 1.103$ (di mana $p > 1$) mengonfirmasi bahwa fungsi laju kegagalan (*hazard rate*) data pernikahan ini memiliki bentuk *unimodal* (naik di awal lalu turun perlahan), yang merupakan karakteristik utama distribusi Log-Logistik. Dengan demikian, visualisasi ini secara empiris membuktikan bahwa asumsi penggunaan model parametrik distribusi Log-Logistik sangat valid, tepat, dan representatif untuk memodelkan waktu kesintasan data tersebut.
+
+```{r}
+fit_ll <- survreg(
+  Surv(years, div) ~ heduc + heblack + mixed + agediff,
+  data = data,
+  dist = "loglogistic"
+)
+
+summary(fit_ll)
+```
+
+## **Persamaan Model AFT Log-Logistic**
+
+Berdasarkan hasil estimasi parameter model parametrik AFT dengan distribusi Log-Logistic, persamaan nilai dugaan waktu daya tahan ($\log(\hat{T}_i)$) adalah sebagai berikut:
+
+$$\log(\hat{T}_i) = 4.4761 - 0.3991(\text{heduc}_{12\text{-}15}) - 0.0828(\text{heduc}_{>15}) - 0.2291(\text{heblack}_1) \\- 0.2089(\text{mixed}_1) - 0.4542(\text{agediff}_{\text{olderwife}}) - 0.4669(\text{agediff}_{\text{Peer}})$$
+
+------------------------------------------------------------------------
+
+Atau jika ditransformasikan ke dalam bentuk **Fungsi Laju Risiko (*Hazard Function*)** Log-Logistic dengan parameter komponen $\theta_i = \exp(-\mathbf{x}_i'\boldsymbol{\beta})$ dan parameter bentuk $p = \frac{1}{\text{scale}}$, rumusnya menjadi:
+
+$$\hat{h}(t \mid \mathbf{Z}_i) = \frac{\frac{p}{\theta_i} \left( \frac{t}{\theta_i} \right)^{p-1}}{1 + \left( \frac{t}{\theta_i} \right)^p}$$
+
+Di mana komponen parameter penyusunnya berdasarkan nilai output adalah: \* Parameter Bentuk (*Shape parameter*): $$p = \frac{1}{0.9622} \approx 1.0393$$
+
+-   Parameter Skala Spesifik Individu ke-$i$ ($\theta_i$): $$\theta_i = \exp\left( - \left[ 4.4761 - 0.3991(\text{heduc}_{12\text{-}15}) - \dots - 0.4669(\text{agediff}_{\text{Peer}}) \right] \right)$$
+
+## **Uji Signifikansi (LRT)**
+
+berdasarkan hasil uji *Likelihood Ratio Test*, diperoleh nilai statistik hitung LRT sebesar **61.64** dengan *p-value* sebesar $2.1 \times 10^{-11}$ (sudah ada di tabel output). Karena nilai *p-value* $< \alpha$ (0.05), maka keputusan yang diambil adalah **Tolak** $H_0$. Hal ini menunjukkan bahwa **minimal ada satu kovariat di antara tingkat pendidikan suami, ras suami, tipe pernikahan, atau perbedaan usia pasangan yang berpengaruh signifikan secara nyata terhadap peluang daya tahan pernikahan di dalam populasi**. Dengan kata lain, model penuh AFT Log-Logistic secara statistik jauh lebih layak dan fit digunakan dibandingkan model null. Selanjutnya akan dilakukan uji parsial pada setiap kovariat dan interpretasi hasil.
+
+## **Ekstraksi Parameter Kunci**
+
+```{r}
+beta0_hat <- fit_ll$coefficients["(Intercept)"]
+beta1_hat <- fit_ll$coefficients["heduc12-15"]
+beta2_hat <- fit_ll$coefficients["heduc>15"]
+beta3_hat <- fit_ll$coefficients["heblack1"]
+beta4_hat <- fit_ll$coefficients["mixed1"]
+beta5_hat <- fit_ll$coefficients["agediffOlderWife"]
+beta6_hat <- fit_ll$coefficients["agediffPeer"]
+sigma_hat <- fit_ll$scale
+p_hat     <- 1 / sigma_hat
+```
+
+```{r}
+teks_output <- c(
+  "=== Parameter Model Log-Logistik (AFT) ===",
+  paste("Intercept (b0)                  :", round(beta0_hat, 4)),
+  paste("Koefisien TP(12-15)             :", round(beta1_hat, 4)),
+  paste("Koefisien TP(>15)               :", round(beta2_hat, 4)),
+  paste("Koefisien Black Husbu           :", round(beta3_hat, 4)),
+  paste("Koefisien Cross ethnic Marriage :", round(beta4_hat, 4)),
+  paste("Koefisien OlderWife             :", round(beta5_hat, 4)),
+  paste("Koefisien Peer                  :", round(beta6_hat, 4)),
+  paste("Scale (sigma = 1/p)             :", round(sigma_hat, 4)),
+  paste("Shape (p = 1/sigma)             :", round(p_hat, 4))
+)
+
+cat(teks_output, sep = "\n")
+```
+
+## **Faktor Akselerasi**
+
+Model *Accelerated Failure Time* (AFT) merupakan alternatif utama ketika asumsi *Proportional Hazards* (PH) pada model Cox terlanggar. Berbeda dengan model Cox yang berfokus pada efek multiplikatif terhadap *hazard*, model AFT bekerja dengan melakukan **transformasi logaritma terhadap variabel waktu (respon)**.
+
+> **Inti Perbedaan:** Model Cox mengasumsikan kovariat melipatgandakan *risiko kejadian*, sedangkan model AFT mengasumsikan kovariat melipatgandakan (mempercepat/memperlambat) *waktu daya tahan*.
+
+#### Formulasi dan Faktor Akselerasi ($\gamma$)
+
+Misalkan kita membandingkan dua kelompok (contoh: Kelompok 1 dan Kelompok 2), asumsi dasar model AFT dinyatakan melalui hubungan fungsi daya tahan berikut:
+
+$$S_2(t) = S_1(\gamma t), \quad t \ge 0$$
+
+Di mana $\gamma$ disebut sebagai **Fungsi/Faktor Akselerasi**. Dalam *framework* regresi, faktor akselerasi ini diparameterisasi menggunakan eksponensial dari koefisien regresi ($\alpha$):
+
+$$S_2(t) = S_1(e^{\alpha} \cdot t)$$
+
+#### Nilai Faktor Akselerasi ($\gamma$)
+
+```{r}
+output_af <- c(
+  paste("Faktor akselerasi (e^β1) :", round(exp(beta1_hat), 4)),
+  paste("Faktor akselerasi (e^β2) :", round(exp(beta2_hat), 4)),
+  paste("Faktor akselerasi (e^β3) :", round(exp(beta3_hat), 4)),
+  paste("Faktor akselerasi (e^β4) :", round(exp(beta4_hat), 4)),
+  paste("Faktor akselerasi (e^β5) :", round(exp(beta5_hat), 4)),
+  paste("Faktor akselerasi (e^β6) :", round(exp(beta6_hat), 4))
+)
+
+cat(output_af, sep = "\n")
+```
+
+#### Selang Kepercayaan 95% Faktor Akselerasi ($\gamma$)
+
+```{r}
+beta_hat <- coef(fit_ll)
+n_kovariat <- length(beta_hat)
+se_beta <- sqrt(diag(vcov(fit_ll)[1:n_kovariat, 1:n_kovariat]))
+beta_CI_L <- beta_hat - 1.96 * se_beta
+beta_CI_U <- beta_hat + 1.96 * se_beta
+
+AF      <- exp(beta_hat)
+AF_CI_L <- exp(beta_CI_L)
+AF_CI_U <- exp(beta_CI_U)
+tabel_CI_AFT <- data.frame(
+  Koefisien_Beta = round(beta_hat, 4),
+  Faktor_Akselerasi = round(AF, 4),
+  CI_Bawah_95 = round(AF_CI_L, 4),
+  CI_Atas_95 = round(AF_CI_U, 4)
+)
+
+print(tabel_CI_AFT)
+```
+
+#### **Interpretasi Model AFT Log-Logistic**
+
+Berikut adalah hasil estimasi parameter dan nilai faktor akselerasi ($\gamma = e^{\beta}$) dari model *Accelerated Failure Time* (AFT) dengan asumsi distribusi Log-Logistic:
+
+| Kovariat | Kategori | Koefisien ($\beta$) | Faktor Akselerasi ($\gamma = e^{\beta}$) | *p-value* | Kesimpulan |
+|:-----------|:-----------|:----------:|:----------:|:----------:|:-----------|
+| **Pendidikan Suami (`heduc`)** | 12-15 years <br> \>15 years | -0.3991 <br> -0.0827 | 0.6709 <br> 0.9206 | \< 0.05 <br> 0.513 | Signifikan <br> Tidak Signifikan |
+| **Ras Suami (`heblack`)** | Black (`1`) | -0.2292 | 0.7952 | 0.014 | Signifikan |
+| **Tipe Pernikahan (`mixed`)** | Mixed Race (`1`) | -0.2090 | 0.8114 | 0.030 | Signifikan |
+| **Perbedaan Usia (`agediff`)** | Older Wife <br> Peer | -0.4542 <br> -0.4668 | 0.6350 <br> 0.6270 | 0.031 <br> \< 0.05 | Signifikan <br> Signifikan |
+
+*Catatan: Kelompok basis (reference group) untuk masing-masing variabel adalah `heduc <12 years`, `heblack Otherwise (0)`, `mixed Same Race (0)`, dan `agediff OlderHusband`.*
+
+1.  **Tingkat Pendidikan Suami (`heduc`)**
+    -   **`heduc 12-15 years` (**$\gamma = 0.6709$): Suami dengan tingkat pendidikan 12–15 tahun secara signifikan memiliki waktu bertahan pernikahan yang lebih pendek, yaitu hanya **0.6709 kali** (atau sekitar **32.9% lebih cepat** menuju ambang perceraian) dibandingkan dengan kelompok suami berpendidikan rendah ($<12$ tahun).
+    -   **`heduc >15 years` (**$\gamma = 0.9206$): Kelompok suami berpendidikan tinggi ($>15$ tahun) tidak menunjukkan perbedaan durasi waktu pernikahan yang signifikan ($p = 0.513 > 0.05$) dibandingkan kelompok basis.
+2.  **Ras Suami (`heblack`)**
+    -   **`heblack Black (1)` (**$\gamma = 0.7952$): Kelompok suami berkulit hitam secara signifikan memiliki waktu menuju perceraian yang **20.5% lebih cepat** ($\gamma = 0.7952$) dibandingkan kelompok ras suami lainnya.
+3.  **Tipe Pernikahan (`mixed`)**
+    -   **`mixed Mixed Race (1)` (**$\gamma = 0.8114$): Pasangan dengan tipe pernikahan antar-ras (*Mixed Race*) terbukti secara signifikan mempercepat waktu terjadinya risiko perceraian menjadi **0.8114 kali lebih pendek** (atau **18.9% lebih cepat**) dibandingkan pasangan sesama ras.
+4.  **Perbedaan Usia Pasangan (`agediff`)**
+    -   **`agediff Older Wife` (**$\gamma = 0.6350$): Pasangan dengan karakteristik istri berusia lebih tua memiliki waktu bertahan pernikahan yang signifikan **36.5% lebih singkat** sebelum menghadapi risiko perceraian dibandingkan kelompok suami lebih tua (*Older Husband*).
+    -   **`agediff Peer` (**$\gamma = 0.6270$): Pasangan dengan usia sebaya (*Peer*) menunjukkan laju percepatan kegagalan paling tinggi, di mana waktu untuk mempertahankan pernikahan berjalan **37.3% lebih cepat** menuju perceraian jika dibandingkan dengan pasangan yang suaminya berusia lebih tua.
+
+## **Puncak Kurva Survival, Shape, dan Scale Parameter**
+
+```{r}
+p_shape   <- 1 / fit_ll$scale
+sigma_val <- fit_ll$scale
+
+mu_baseline  <- fit_ll$coefficients["(Intercept)"]
+lam_baseline <- exp(-mu_baseline / sigma_val)
+
+t_peak <- ((p_shape - 1) / lam_baseline)^(1 / p_shape)
+```
+
+```{r}
+p_shape
+sigma_val
+t_peak
+```
+
+Nilai $\lambda =0.962$ menunjukkan nilai rata-rata waktu sampai terjadinya sebuah *event*. Selanjutnya nilai $p=1.04$ merupakan puncak hazard sebelum akhirnya mengalami penurunan kembali. Karena $p>1$, maka ini juga merupakan indikasi bahwa model log-logistik sudah tepat digunakan. Berdasarkan hasil estimasi model parametrik AFT Log-Logistik, fungsi *hazard* (risiko perceraian) mencapai titik puncaknya pada waktu $t = 3.655$ tahun setelah pernikahan. Hal ini menunjukkan bahwa fase awal pernikahan, khususnya menjelang tahun keempat, merupakan periode dengan risiko perceraian tertinggi bagi pasangan dalam populasi ini. Setelah melewati titik kritis tersebut, laju risiko perceraian terbukti mengalami penurunan secara bertahap seiring dengan bertambahnya usia usia pernikahan pasangan.
+
+## **Laju Hazard Pengaruh Kovariat**
+
+```{r}
+beta_hat   <- coef(fit_ll)            
+scale_val  <- fit_ll$scale
+p_shape    <- 1 / scale_val
+
+t_waktu <- median(data$years, na.rm = TRUE) 
+beta_0 <- beta_hat[1]
+theta_kontrol  <- exp(beta_0)
+hazard_kontrol <- ((p_shape / theta_kontrol) * (t_waktu / theta_kontrol)^(p_shape - 1)) / (1 + (t_waktu / theta_kontrol)^p_shape)
+
+hasil_hazard <- data.frame()
+
+for (i in 2:length(beta_hat)) {
+  nama_kovariat <- names(beta_hat)[i]
+  beta_i        <- beta_hat[i]
+  
+  theta_efek  <- exp(beta_0 + beta_i)
+  
+  hazard_efek <- ((p_shape / theta_efek) * (t_waktu / theta_efek)^(p_shape - 1)) / 
+                 (1 + (t_waktu / theta_efek)^p_shape)
+  
+  hazard_ratio <- hazard_efek / hazard_kontrol
+  
+  baris_baru <- data.frame(
+    Kovariat = nama_kovariat,
+    Hazard_Kontrol = round(hazard_kontrol, 6),
+    Hazard_Efek_Beta = round(hazard_efek, 6),
+    Hazard_Ratio = round(hazard_ratio, 6)
+  )
+  hasil_hazard <- rbind(hasil_hazard, baris_baru)
+}
+
+cat("--- Analisis Laju Hazard pada t =", t_waktu, "Tahun ---\n\n")
+print(hasil_hazard, row.names = FALSE)
+```
+
+Berbeda dengan eksponensial yang memiliki hazard konstan pada setiap waktu (*t*), model log-logistik memiliki laju hazard akan berbeda tergantung nilai *t* yang menjadi masukkannya. Hal ini berimbas pada *hazard ratio* nya juga. Oleh karena itu, *hazard* dan *hazard ratio* dievaluasi pada median dari data survival.
+
+## **Kurva Estimasi S(t) dengan AFT log-logistik**
+
+### Baseline (Asli vs Fitting)
+
+```{r}
+# Baseline
+waktu_grid <- seq(0, max(data$years), length.out = 100)
+km_overall <- survfit(Surv(years, div) ~ 1, data = data)
+plot(km_overall, col = "black", lty = 1, lwd = 2,
+     xlab = "Waktu (Tahun)", ylab = "Peluang Survival S(t)",
+     main = "Kurva KM Baseline vs Fitting Log-Logistic Model Null")
+
+# Model
+fit_ll_null <- survreg(Surv(years, div) ~ 1, data = data, dist = "loglogistic")
+mean_null <- predict(fit_ll_null, newdata = data.frame(1), type = "link")[1]
+
+
+lines(waktu_grid, 1 - psurvreg(waktu_grid, mean = mean_null, scale = fit_ll_null$scale, dist = "loglogistic"), 
+      col = "red", lty = 2, lwd = 2.5)
+
+legend("bottomleft", legend = c("KM: Data Aktual Keseluruhan", "AFT: Kurva Log-Logistic (Null)"), 
+       col = c("black", "red"), lty = c(1, 2), lwd = 2)
+```
+
+### Kovariat Heduc (Asli vs Fitting)
+
+```{r}
+waktu_grid <- seq(0, max(data$years), length.out = 100)
+basis_df <- data[1, , drop = FALSE]
+
+get_surv_pred <- function(v_heduc, v_heblack, v_mixed, v_agediff) {
+  df_new <- basis_df
+  df_new$heduc   <- factor(v_heduc, levels = levels(data$heduc))
+  df_new$heblack <- factor(v_heblack, levels = levels(data$heblack))
+  df_new$mixed   <- factor(v_mixed, levels = levels(data$mixed))
+  df_new$agediff <- factor(v_agediff, levels = levels(data$agediff))
+  mean_val <- predict(fit_ll, newdata = df_new, type = "link")[1]
+  return(1 - psurvreg(waktu_grid, mean = mean_val, scale = fit_ll$scale, dist = "loglogistic"))
+}
+
+km_heduc <- survfit(Surv(years, div) ~ heduc, data = data)
+plot(km_heduc, col = c("black", "red", "blue"), lty = 1, lwd = 1.5,
+     xlab = "Waktu (Tahun)", ylab = "Peluang Survival S(t)",
+     main = "Kurva KM vs Fitting Log-Logistic (Kovariat: heduc)")
+
+lines(waktu_grid, get_surv_pred("<12", "0", "0", "OlderHusband"), col = "black", lty = 2, lwd = 2)
+lines(waktu_grid, get_surv_pred("12-15", "0", "0", "OlderHusband"), col = "red", lty = 2, lwd = 2)
+lines(waktu_grid, get_surv_pred(">15", "0", "0", "OlderHusband"), col = "blue", lty = 2, lwd = 2)
+
+legend("bottomleft", 
+       legend = c("KM: <12", "KM: 12-15", "KM: >15", 
+                  "AFT: <12", "AFT: 12-15", "AFT: >15"), 
+       col = c("black", "red", "blue", "black", "red", "blue"), 
+       lty = c(1, 1, 1, 2, 2, 2), 
+       lwd = 2, 
+       ncol = 2, # Dibuat 2 kolom agar legenda rapi menyamping
+       cex = 0.8)
+```
+
+### Kovariat Heblack (Asli vs Fitting)
+
+```{r}
+waktu_grid <- seq(0, max(data$years), length.out = 100)
+basis_df <- data[1, , drop = FALSE]
+
+get_surv_pred <- function(v_heduc, v_heblack, v_mixed, v_agediff) {
+  df_new <- basis_df
+  df_new$heduc   <- factor(v_heduc, levels = levels(data$heduc))
+  df_new$heblack <- factor(v_heblack, levels = levels(data$heblack))
+  df_new$mixed   <- factor(v_mixed, levels = levels(data$mixed))
+  df_new$agediff <- factor(v_agediff, levels = levels(data$agediff))
+  
+  mean_val <- predict(fit_ll, newdata = df_new, type = "link")[1]
+  return(1 - psurvreg(waktu_grid, mean = mean_val, scale = fit_ll$scale, dist = "loglogistic"))
+}
+
+km_heblack <- survfit(Surv(years, div) ~ heblack, data = data)
+plot(km_heblack, col = c("black", "red"), lty = 1, lwd = 1.5,
+     xlab = "Waktu (Tahun)", ylab = "Peluang Survival S(t)",
+     main = "Kurva KM vs Fitting Log-Logistic (Kovariat: heblack)")
+
+lines(waktu_grid, get_surv_pred("12-15", "0", "0", "OlderHusband"), col = "black", lty = 2, lwd = 2)
+lines(waktu_grid, get_surv_pred("12-15", "1", "0", "OlderHusband"), col = "red", lty = 2, lwd = 2)
+
+legend("bottomleft", 
+       legend = c("KM: Non-Black (0)", "KM: Black (1)", 
+                  "AFT: Non-Black (0)", "AFT: Black (1)"), 
+       col = c("black", "red", "black", "red"), 
+       lty = c(1, 1, 2, 2), 
+       lwd = 2, 
+       ncol = 2, # Dibuat 2 kolom berdampingan agar hemat space
+       cex = 0.8)
+```
+
+### Kovariat Mixed (Asli vs Fitting)
+
+```{r}
+waktu_grid <- seq(0, max(data$years), length.out = 100)
+basis_df <- data[1, , drop = FALSE]
+
+get_surv_pred <- function(v_heduc, v_heblack, v_mixed, v_agediff) {
+  df_new <- basis_df
+  df_new$heduc   <- factor(v_heduc, levels = levels(data$heduc))
+  df_new$heblack <- factor(v_heblack, levels = levels(data$heblack))
+  df_new$mixed   <- factor(v_mixed, levels = levels(data$mixed))
+  df_new$agediff <- factor(v_agediff, levels = levels(data$agediff))
+  
+  mean_val <- predict(fit_ll, newdata = df_new, type = "link")[1]
+  return(1 - psurvreg(waktu_grid, mean = mean_val, scale = fit_ll$scale, dist = "loglogistic"))
+}
+
+km_mixed <- survfit(Surv(years, div) ~ mixed, data = data)
+plot(km_mixed, col = c("black", "red"), lty = 1, lwd = 1.5,
+     xlab = "Waktu (Tahun)", ylab = "Peluang Survival S(t)",
+     main = "Kurva KM vs Fitting Log-Logistic (Kovariat: mixed)")
+
+lines(waktu_grid, get_surv_pred("12-15", "0", "0", "OlderHusband"), col = "black", lty = 2, lwd = 2)
+lines(waktu_grid, get_surv_pred("12-15", "0", "1", "OlderHusband"), col = "red", lty = 2, lwd = 2)
+
+legend("bottomleft", 
+       legend = c("KM: Same Race (0)", "KM: Mixed Race (1)", 
+                  "AFT: Same Race (0)", "AFT: Mixed Race (1)"), 
+       col = c("black", "red", "black", "red"), 
+       lty = c(1, 1, 2, 2), 
+       lwd = 2, 
+       ncol = 2, 
+       cex = 0.8)
+```
+
+### Kovariat Agediff (Asli vs Fitting)
+
+```{r}
+waktu_grid <- seq(0, max(data$years), length.out = 100)
+basis_df <- data[1, , drop = FALSE]
+
+get_surv_pred <- function(v_heduc, v_heblack, v_mixed, v_agediff) {
+  df_new <- basis_df
+  df_new$heduc   <- factor(v_heduc, levels = levels(data$heduc))
+  df_new$heblack <- factor(v_heblack, levels = levels(data$heblack))
+  df_new$mixed   <- factor(v_mixed, levels = levels(data$mixed))
+  df_new$agediff <- factor(v_agediff, levels = levels(data$agediff))
+  
+  mean_val <- predict(fit_ll, newdata = df_new, type = "link")[1]
+  return(1 - psurvreg(waktu_grid, mean = mean_val, scale = fit_ll$scale, dist = "loglogistic"))
+}
+
+km_agediff <- survfit(Surv(years, div) ~ agediff, data = data)
+plot(km_agediff, col = c("black", "red", "blue"), lty = 1, lwd = 1.5,
+     xlab = "Waktu (Tahun)", ylab = "Peluang Survival S(t)",
+     main = "Kurva KM vs Fitting Log-Logistic (Kovariat: agediff)")
+lines(waktu_grid, get_surv_pred("12-15", "0", "0", "OlderHusband"), col = "black", lty = 2, lwd = 2)
+lines(waktu_grid, get_surv_pred("12-15", "0", "0", "OlderWife"), col = "red", lty = 2, lwd = 2)
+lines(waktu_grid, get_surv_pred("12-15", "0", "0", "Peer"), col = "blue", lty = 2, lwd = 2)
+
+legend("bottomleft", 
+       legend = c("KM: Older Husband", "KM: Older Wife", "KM: Peer", 
+                  "AFT: Older Husband", "AFT: Older Wife", "AFT: Peer"), 
+       col = c("black", "red", "blue", "black", "red", "blue"), 
+       lty = c(1, 1, 1, 2, 2, 2), 
+       lwd = 2, 
+       ncol = 2, 
+       cex = 0.75)
+```
+
+## **Estimasi Fungsi Hazard dengan AFT Log-logistik**
+
+### Baseline (Asli vs Fitting)
+
+```{r}
+t_plot <- seq(0.1, max(data$years), length.out = 400)
+fit_ll_null <- survreg(Surv(years, div) ~ 1, data = data, dist = "loglogistic")
+p_null      <- 1 / fit_ll_null$scale
+sigma_null  <- fit_ll_null$scale
+mu_null     <- fit_ll_null$coefficients[1]
+
+lam_null  <- exp(-mu_null / sigma_null)
+h_ll_null <- (lam_null * p_null * t_plot^(p_null - 1)) / (1 + lam_null * t_plot^p_null)
+
+haz_overall <- muhaz(data$years, data$div)
+plot(haz_overall, col = "black", lty = 1, lwd = 2,
+     xlab = "Waktu (Tahun)", ylab = "Hazard", 
+     main = "Fungsi Hazard Baseline: Data Aktual vs Model Null",
+     ylim = c(0, max(c(haz_overall$haz, h_ll_null)) * 1.2))
+
+lines(t_plot, h_ll_null, col = "red", lty = 2, lwd = 2.5)
+
+legend("topright", legend = c("Data Aktual (Smoothed)", "AFT: Log-Logistic Null"),
+       col = c("black", "red"), lty = c(1, 2), lwd = 2)
+```
+
+#### Fungsi Hazard Model Kovariat Log-logistik
+
+```{r}
+haz_loglogistic <- function(t, mu, sigma){
+
+  p_shape <- 1 / sigma
+  lambda  <- exp(-mu / sigma)
+
+  (lambda * p_shape * t^(p_shape - 1)) /
+    (1 + lambda * t^p_shape)
+}
+```
+
+#### Grid Waktu
+
+```{r}
+t_plot <- seq(
+  0.1,
+  max(data$years),
+  length.out = 400
+)
+```
+
+#### Hazard Marginal
+
+```{r}
+get_hazard_marginal <- function(varname, level_value){
+
+  newdata <- data
+
+  newdata[[varname]] <- factor(
+    level_value,
+    levels = levels(data[[varname]])
+  )
+
+  mu_vec <- predict(
+    fit_ll,
+    newdata = newdata,
+    type = "link"
+  )
+
+  haz_mat <- sapply(mu_vec, function(mu){
+
+    haz_loglogistic(
+      t_plot,
+      mu,
+      fit_ll$scale
+    )
+
+  })
+
+  rowMeans(haz_mat)
+}
+```
+
+### **Kovariat Heblack (Asli vs Fitting)**
+
+```{r}
+h_nonblack <- get_hazard_marginal("heblack", "0")
+h_black    <- get_hazard_marginal("heblack", "1")
+```
+
+```{r}
+haz_nonblack <- muhaz(
+  data$years[data$heblack == "0"],
+  data$div[data$heblack == "0"]
+)
+
+haz_black <- muhaz(
+  data$years[data$heblack == "1"],
+  data$div[data$heblack == "1"]
+)
+```
+
+```{r}
+plot(
+  haz_nonblack,
+  col = "black",
+  lwd = 2,
+  xlab = "Waktu (Tahun)",
+  ylab = "Hazard",
+  ylim = c(0,0.026),
+  main = "Hazard Empiris vs Hazard Log-Logistic (heblack)"
+)
+
+lines(
+  haz_black,
+  col = "red",
+  lwd = 2
+)
+
+lines(
+  t_plot,
+  h_nonblack,
+  col = "black",
+  lty = 2,
+  lwd = 2.5
+)
+
+lines(
+  t_plot,
+  h_black,
+  col = "red",
+  lty = 2,
+  lwd = 2.5
+)
+
+legend(
+  "topright",
+  legend = c(
+    "Data: Non-Black",
+    "Data: Black",
+    "AFT: Non-Black",
+    "AFT: Black"
+  ),
+  col = c(
+    "black","red",
+    "black","red"
+  ),
+  lty = c(
+    1,1,
+    2,2
+  ),
+  lwd = 2,
+  ncol = 2,
+  cex = 0.8
+)
+```
+
+### Kovariat Heduc (Asli vs Fitting)
+
+```{r}
+h_lt12 <- get_hazard_marginal("heduc", "<12")
+h_1215 <- get_hazard_marginal("heduc", "12-15")
+h_gt15 <- get_hazard_marginal("heduc", ">15")
+```
+
+```{r}
+haz_lt12 <- muhaz(
+  data$years[data$heduc=="<12"],
+  data$div[data$heduc=="<12"]
+)
+
+haz_1215 <- muhaz(
+  data$years[data$heduc=="12-15"],
+  data$div[data$heduc=="12-15"]
+)
+
+haz_gt15 <- muhaz(
+  data$years[data$heduc==">15"],
+  data$div[data$heduc==">15"]
+)
+```
+
+```{r}
+plot(haz_lt12, col="black", lwd=2,
+     main="Hazard: heduc",
+     xlab="Waktu (Tahun)",
+     ylab="Hazard",
+     ylim= c(0,0.030))
+
+lines(haz_1215, col="red", lwd=2)
+lines(haz_gt15, col="blue", lwd=2)
+
+lines(t_plot, h_lt12, col="black", lty=2, lwd=2.5)
+lines(t_plot, h_1215, col="red", lty=2, lwd=2.5)
+lines(t_plot, h_gt15, col="blue", lty=2, lwd=2.5)
+
+legend(
+  "topright",
+  legend = c(
+    "Data: <12",
+    "Data: 12-15",
+    "Data: >15",
+    "AFT: <12",
+    "AFT: 12-15",
+    "AFT: >15"
+  ),
+  col = c(
+    "black", "red", "blue",
+    "black", "red", "blue"
+  ),
+  lty = c(
+    1, 1, 1,
+    2, 2, 2
+  ),
+  lwd = 2,
+  ncol = 2,
+  cex = 0.8
+)
+```
+
+### Kovariat mixed (asli vs Fitting)
+
+```{r}
+h_nonmixed <- get_hazard_marginal("mixed", "0")
+h_mixed    <- get_hazard_marginal("mixed", "1")
+```
+
+```{r}
+haz_nonmixed <- muhaz(
+  data$years[data$mixed=="0"],
+  data$div[data$mixed=="0"]
+)
+
+haz_mixed <- muhaz(
+  data$years[data$mixed=="1"],
+  data$div[data$mixed=="1"]
+)
+```
+
+```{r}
+plot(haz_nonmixed, col="black", lwd=2,
+     main="Hazard: mixed",
+     xlab="Waktu (Tahun)",
+     ylab="Hazard",
+     ylim= c(0,0.030))
+
+lines(haz_mixed, col="red", lwd=2)
+
+lines(t_plot, h_nonmixed, col="black", lty=2, lwd=2.5)
+lines(t_plot, h_mixed, col="red", lty=2, lwd=2.5)
+
+legend(
+  "topright",
+  legend = c(
+    "Data: Non-Mixed",
+    "Data: Mixed",
+    "AFT: Non-Mixed",
+    "AFT: Mixed"
+  ),
+  col = c(
+    "black", "red",
+    "black", "red"
+  ),
+  lty = c(
+    1, 1,
+    2, 2
+  ),
+  lwd = 2,
+  ncol = 2,
+  cex = 0.8
+)
+```
+
+### Kovariat Agediff (Asli vs Fitting)
+
+```{r}
+h_olderhusband <- get_hazard_marginal(
+  "agediff",
+  "OlderHusband"
+)
+
+h_olderwife <- get_hazard_marginal(
+  "agediff",
+  "OlderWife"
+)
+
+h_peer <- get_hazard_marginal(
+  "agediff",
+  "Peer"
+)
+```
+
+```{r}
+haz_olderhusband <- muhaz(
+  data$years[data$agediff=="OlderHusband"],
+  data$div[data$agediff=="OlderHusband"]
+)
+
+haz_olderwife <- muhaz(
+  data$years[data$agediff=="OlderWife"],
+  data$div[data$agediff=="OlderWife"]
+)
+
+haz_peer <- muhaz(
+  data$years[data$agediff=="Peer"],
+  data$div[data$agediff=="Peer"]
+)
+```
+
+```{r}
+plot(haz_olderhusband, col="black", lwd=2,
+     main="Hazard: agediff",
+     xlab="Waktu (Tahun)",
+     ylab="Hazard",
+     ylim= c(0,0.025))
+
+lines(haz_olderwife, col="red", lwd=2)
+lines(haz_peer, col="blue", lwd=2)
+
+lines(t_plot, h_olderhusband,
+      col="black", lty=2, lwd=2.5)
+
+lines(t_plot, h_olderwife,
+      col="red", lty=2, lwd=2.5)
+
+lines(t_plot, h_peer,
+      col="blue", lty=2, lwd=2.5)
+
+legend(
+  "topright",
+  legend = c(
+    "Data: Older Husband",
+    "Data: Older Wife",
+    "Data: Peer",
+    "AFT: Older Husband",
+    "AFT: Older Wife",
+    "AFT: Peer"
+  ),
+  col = c(
+    "black", "red", "blue",
+    "black", "red", "blue"
+  ),
+  lty = c(
+    1, 1, 1,
+    2, 2, 2
+  ),
+  lwd = 2,
+  ncol = 2,
+  cex = 0.8
+)
+```
+
+# **MODEL 2: STRATIFIED-COX MODEL**
+
+```{r}
+fit_stratified_cox <- coxph(
+  Surv(years, div) ~ heduc + mixed + agediff + strata(heblack), 
+  data = data
+)
+
+summary(fit_stratified_cox)
+```
+
+```{r}
+cox.zph(fit_stratified_cox)
+```
+
+Berdasarkan pengujian asumsi *Proportional Hazards* (PH) sebelumnya, peubah ras suami (`heblack`) terbukti melanggar asumsi PH. Oleh karena itu, dilakukan pemodelan alternatif menggunakan **Stratified Cox Model** dengan melakukan stratifikasi pada peubah `heblack`. Peubah strata ini diizinkan memiliki fungsi *baseline hazard* yang berbeda untuk setiap stratum ($g = 0$ untuk ras lainnya dan $g = 1$ untuk berkulit hitam). Perhatikan, saat dilakukan uji asumsi PH kembali pada model stratified cox, asumsi PH sudah terpenuhi untuk setiap kovariat (dengan menjadikan heblack sebagai strata).
+
+## **Persamaan Model Stratified Cox**
+
+Formulasi umum untuk fungsi laju risiko (*hazard function*) pada model Stratified Cox dengan peubah strata $g$ adalah:
+
+$$h_g(t \mid \mathbf{X}_i) = h_{0,g}(t) \exp(\mathbf{X}_i'\boldsymbol{\beta})$$
+
+Berdasarkan output estimasi parameter dari model, persamaan fungsi laju risiko untuk data pernikahan ini adalah sebagai berikut:
+
+-   **Untuk Stratum 0 (`heblack = Otherwise`):** $$h_0(t \mid \mathbf{X}_i) = h_{0,0}(t) \exp\left(0.30610(\text{heduc}_{12\text{-}15}) + 0.03981(\text{heduc}_{>15}) \\+ 0.15852(\text{mixed}_1) + 0.37101(\text{agediff}_{\text{olderwife}}) + 0.38557(\text{agediff}_{\text{Peer}})\right)$$
+
+-   **Untuk Stratum 1 (`heblack = Black`):** $$h_1(t \mid \mathbf{X}_i) = h_{0,1}(t) \exp\left(0.30610(\text{heduc}_{12\text{-}15}) + 0.03981(\text{heduc}_{>15}) \\+ 0.15852(\text{mixed}_1) + 0.37101(\text{agediff}_{\text{olderwife}}) + 0.38557(\text{agediff}_{\text{Peer}})\right)$$
+
+*Keterangan:* $h_{0,0}(t)$ dan $h_{0,1}(t)$ adalah fungsi baseline hazard yang berbeda bagi masing-masing kelompok ras suami, namun keduanya berbagi nilai koefisien regresi ($\beta$) yang sama untuk peubah lainnya.
+
+------------------------------------------------------------------------
+
+## **Uji Simultan Model (Likelihood Ratio Test)**
+
+Untuk menguji apakah seluruh peubah bebas (`heduc`, `mixed`, dan `agediff`) secara bersama-sama (simultan) memiliki pengaruh yang signifikan terhadap laju risiko perceraian setelah dikontrol oleh strata ras suami (`heblack`), dilakukan pengujian *Likelihood Ratio Test* (LRT).
+
+### Hipotesis Uji
+
+-   **Hipotesis Nol (**$H_0$): $$\beta_1 = \beta_2 = \dots = \beta_5 = 0$$ *(Seluruh peubah bebas secara simultan tidak memiliki pengaruh yang signifikan terhadap laju risiko perceraian).*
+
+-   **Hipotesis Alternatif (**$H_1$): $$\text{Minimal ada satu } \beta_j \neq 0 \quad \text{untuk } j = 1, 2, \dots, 5$$ *(Minimal ada satu peubah bebas yang memiliki pengaruh signifikan terhadap laju risiko perceraian).*
+
+### Hasil Pengujian dan Interpretasi
+
+Berdasarkan output pengujian model *Stratified Cox*, diperoleh karakteristik berikut: \* **Statistik Uji LRT (Chi-Square Hitung):** $45.75$ \* **Derajat Bebas (*Degrees of Freedom* /** $df$): $5$ \* $p\text{-value}$: $1 \times 10^{-8}$
+
+**Kesimpulan:** Karena nilai $p\text{-value} = 1 \times 10^{-8} < \alpha$ (0.05), maka keputusan uji statistik adalah **Tolak** $H_0$. Dengan demikian, terdapat bukti empiris yang sangat kuat untuk menyatakan bahwa peubah tingkat pendidikan suami, tipe pernikahan, dan perbedaan usia pasangan secara bersama-sama memberikan pengaruh yang signifikan terhadap laju risiko perceraian pada taraf nyata 5%.
+
+------------------------------------------------------------------------
+
+## **Uji Parsial (Uji Wald)**
+
+Untuk menguji signifikansi setiap koefisien peubah secara parsial (individu), digunakan **Uji Wald**.
+
+### Komponen Pengujian
+
+-   **Hipotesis Uji:** $$H_0: \beta_j = 0 \quad (\text{Peubah ke-}j \text{ tidak berpengaruh nyata terhadap laju risiko perceraian})$$ $$H_1: \beta_j \neq 0 \quad (\text{Peubah ke-}j \text{ berpengaruh nyata terhadap laju risiko perceraian})$$
+
+-   **Rumus Statistik Uji Wald (**$Z$): $$Z = \frac{\hat{\beta}_j}{\text{SE}(\hat{\beta}_j)}$$
+
+-   **Kriteria Penolakan** $H_0$: Tolak $H_0$ jika nilai $|Z| > 1.96$ atau jika $\text{p-value} < \alpha$ ($0.05$).
+
+### Tabel Hasil Uji Parsial Model Stratified Cox
+
+| Peubah | Kategori | Koefisien ($\beta$) | SE ($\beta$) | Statistik Wald ($Z$) | *p-value* | Kesimpulan |
+|:----------|:----------|:---------:|:---------:|:---------:|:---------:|:----------|
+| **Pendidikan Suami (`heduc`)** | 12-15 years <br> \>15 years | 0.30610 <br> 0.03981 | 0.06848 <br> 0.11094 | 4.470 <br> 0.359 | $7.81 \times 10^{-6}$ <br> 0.7197 | **Sangat Signifikan** <br> Tidak Signifikan |
+| **Tipe Pernikahan (`mixed`)** | Mixed Race (`1`) | 0.15852 | 0.08125 | 1.951 | 0.0511 | Tidak Signifikan ($\alpha=5\%$) |
+| **Perbedaan Usia (`agediff`)** | Older Wife <br> Peer | 0.37101 <br> 0.38557 | 0.18649 <br> 0.09601 | 1.989 <br> 4.016 | 0.0466 <br> $5.92 \times 10^{-5}$ | **Signifikan** <br> **Sangat Signifikan** |
+
+*Berdasarkan tingkat signifikansi* $\alpha = 5\%$, peubah yang berpengaruh nyata secara parsial terhadap laju risiko perceraian di dalam model Stratified Cox ini adalah **`heduc 12-15 years`**, **`agediff Older Wife`**, dan **`agediff Peer`**.
+
+------------------------------------------------------------------------
+
+## **Tabel Selang Kepercayaan, Nilai Hazard Ratio (HR), dan Interpretasi**
+
+Pada model Cox, nilai eksponensial dari koefisien ($\text{exp}(\beta)$) diinterpretasikan sebagai **Hazard Ratio (HR)**, yaitu rasio perbandingan risiko instan terjadinya perceraian antara kelompok bersangkutan dengan kelompok basisnya.
+
+| Peubah | Kategori | Hazard Ratio ($\text{exp}(\beta)$) | Batas Bawah 95% CI | Batas Atas 95% CI |
+|:--------------|:--------------|:-------------:|:-------------:|:-------------:|
+| **Pendidikan Suami (`heduc`)** | 12-15 years <br> \>15 years | 1.35812 <br> 1.04061 | 1.1875 <br> 0.8373 | 1.553 <br> 1.293 |
+| **Tipe Pernikahan (`mixed`)** | Mixed Race (`1`) | 1.17177 | 0.9993 <br> (Mencakup 1) | 1.374 |
+| **Perbedaan Usia (`agediff`)** | Older Wife <br> Peer | 1.44920 <br> 1.47046 | 1.0055 <br> 1.2182 | 2.089 <br> 1.775 |
+
+*Catatan: Kelompok acuan/basis (reference group) adalah `heduc <12 years`, `mixed Same Race (0)`, dan `agediff OlderHusband`.*
+
+1.  **Tingkat Pendidikan Suami (`heduc`)**
+    -   **`heduc 12-15 years` (**$HR = 1.358$): Suami dengan tingkat pendidikan 12–15 tahun secara signifikan memiliki laju risiko perceraian **1.36 kali lebih besar** (meningkat sekitar **35.8%**) dibandingkan kelompok suami berpendidikan rendah ($<12$ tahun). Nilai ini valid karena selang kepercayaannya tidak mencakup angka 1 ($1.1875, 1.553$).
+    -   **`heduc >15 years` (**$HR = 1.041$): Kelompok suami berpendidikan tinggi tidak menunjukkan perbedaan laju risiko perceraian yang nyata dibandingkan kelompok basis ($p = 0.7197 > 0.05$).
+2.  **Tipe Pernikahan (`mixed`)**
+    -   **`mixed Mixed Race (1)` (**$HR = 1.172$): Pasangan dengan tipe pernikahan antar-ras memiliki kecenderungan laju risiko perceraian 1.17 kali lebih tinggi dibandingkan pasangan sesama ras. Namun, efek ini tidak signifikan pada taraf nyata 5% karena nilai *p-value* sedikit di atas batas kritis ($0.0511 > 0.05$) dan batas bawah selang kepercayaan menyentuh angka 1 ($0.9993$).
+3.  **Perbedaan Usia Pasangan (`agediff`)**
+    -   **`agediff Older Wife` (**$HR = 1.449$): Pasangan dengan posisi istri berusia lebih tua secara signifikan memiliki laju risiko perceraian **1.45 kali lebih tinggi** dibandingkan dengan kelompok acuan suami berusia lebih tua (*Older Husband*).
+    -   **`agediff Peer` (**$HR = 1.470$): Pasangan dengan usia sebaya (*Peer*) mencatatkan peningkatan risiko perceraian sebesar **1.47 kali lebih besar** (atau meningkat sekitar **47.0%**) jika dibandingkan dengan pasangan yang suaminya berusia lebih tua.
+
+## **Evaluasi Kebaikan Model (Concordance Index)**
+
+Untuk menilai kemampuan prediktif atau kebaikan dari model *Stratified Cox* yang telah dibentuk, digunakan ukuran **Concordance Index (C-index)**.
+
+*Concordance Index* mengukur seberapa baik model dalam memprediksi urutan waktu terjadinya suatu peristiwa (dalam hal ini, perceraian) antara satu individu dengan individu lainnya. Nilai C-index berkisar antara 0 hingga 1: \* $C = 0.5$ menunjukkan bahwa kemampuan prediksi model tidak lebih baik daripada tebakan acak (seperti melempar koin). \* $C > 0.5$ menunjukkan model memiliki kemampuan prediktif yang baik (semakin mendekati 1, model semakin akurat). \* $C = 1.0$ menunjukkan model prediktif yang sempurna (selalu benar dalam mengurutkan waktu kegagalan objek).
+
+### Hasil Pengujian dan Interpretasi
+
+Berdasarkan output model *Stratified Cox*, diperoleh nilai: \* **Concordance:** $0.555$ \* **Standard Error (se):** $0.01$
+
+**Interpretasi:** Nilai *Concordance Index* sebesar **0.555** menunjukkan bahwa model *Stratified Cox* yang dibentuk memiliki kemampuan akurasi prediktif sebesar **55.5%** dalam mengurutkan waktu terjadinya perceraian antar-pasangan berdasarkan kovariat tingkat pendidikan, tipe pernikahan, dan perbedaan usia.
+
+Meskipun uji simultan (LRT) sebelumnya menyatakan bahwa variabel-variabel tersebut berpengaruh signifikan secara statistik ($p\text{-value} < 0.05$), kemampuan model secara keseluruhan untuk memprediksi atau mengklasifikasikan urutan waktu ketahanan pernikahan secara riil di lapangan masih tergolong **lemah** (hanya sedikit di atas ambang batas tebakan acak 50%). Hal ini mengindikasikan adanya faktor-faktor eksternal lain di luar model yang tidak teramati di dalam data (seperti kondisi finansial, komunikasi, atau kecocokan personal) yang memiliki andil besar dalam menentukan durasi bertahannya suatu hubungan pernikahan.
+
+## **Kurva Estimasi S(t) dengan Stratified Cox Model**
+
+### Baseline Strata Heblack (Asli vs Fitting)
+
+```{r}
+df_nonblack <- data.frame(heduc="12-15", mixed="0", agediff="OlderHusband", heblack="0")
+df_black    <- data.frame(heduc="12-15", mixed="0", agediff="OlderHusband", heblack="1")
+
+cox_nonblack <- survfit(fit_stratified_cox, newdata = df_nonblack)
+cox_black    <- survfit(fit_stratified_cox, newdata = df_black)
+
+km_heblack <- survfit(Surv(years, div) ~ heblack, data = data)
+plot(km_heblack, col = c("black", "red"), lty = 1, lwd = 1.5, conf.int = FALSE,
+     xlab = "Waktu (Tahun)", ylab = "Peluang Survival S(t)",
+     main = "S(t) Stratified Cox: Kovariat/Strata heblack")
+
+lines(cox_nonblack$time, cox_nonblack$surv, col = "black", lty = 2, lwd = 2, type = "s")
+lines(cox_black$time,    cox_black$surv,    col = "red",   lty = 2, lwd = 2, type = "s")
+
+legend("bottomleft", legend = c("KM: Non-Black", "KM: Black", "Cox: Non-Black", "Cox: Black"),
+       col = c("black", "red", "black", "red"), lty = c(1, 1, 2, 2), lwd = 2, ncol = 2, cex = 0.8)
+```
+
+### Kovariat Heduc (Asli vs Fitting)
+
+```{r}
+df_h1 <- data.frame(heduc="<12",   mixed="0", agediff="OlderHusband", heblack="0")
+df_h2 <- data.frame(heduc="12-15", mixed="0", agediff="OlderHusband", heblack="0")
+df_h3 <- data.frame(heduc=">15",   mixed="0", agediff="OlderHusband", heblack="0")
+
+cox_h1 <- survfit(fit_stratified_cox, newdata = df_h1)
+cox_h2 <- survfit(fit_stratified_cox, newdata = df_h2)
+cox_h3 <- survfit(fit_stratified_cox, newdata = df_h3)
+
+km_heduc <- survfit(Surv(years, div) ~ heduc, data = data)
+plot(km_heduc, col = c("black", "red", "blue"), lty = 1, lwd = 1.5, conf.int = FALSE,
+     xlab = "Waktu (Tahun)", ylab = "Peluang Survival S(t)", 
+     main = "S(t) Stratified Cox: Kovariat heduc")
+
+lines(cox_h1$time, cox_h1$surv, col = "black", lty = 2, lwd = 2, type = "s")
+lines(cox_h2$time, cox_h2$surv, col = "red",   lty = 2, lwd = 2, type = "s")
+lines(cox_h3$time, cox_h3$surv, col = "blue",  lty = 2, lwd = 2, type = "s")
+
+legend("bottomleft", legend = c("KM: <12", "KM: 12-15", "KM: >15", "Cox: <12", "Cox: 12-15", "Cox: >15"),
+       col = c("black", "red", "blue", "black", "red", "blue"), lty = c(1,1,1,2,2,2), lwd = 2, ncol = 2, cex = 0.8)
+```
+
+### Kovariat Mixed (Asli vs Fitting)
+
+```{r}
+df_m0 <- data.frame(heduc="12-15", mixed="0", agediff="OlderHusband", heblack="0")
+df_m1 <- data.frame(heduc="12-15", mixed="1", agediff="OlderHusband", heblack="0")
+
+cox_m0 <- survfit(fit_stratified_cox, newdata = df_m0)
+cox_m1 <- survfit(fit_stratified_cox, newdata = df_m1)
+
+km_mixed <- survfit(Surv(years, div) ~ mixed, data = data)
+plot(km_mixed, col = c("black", "red"), lty = 1, lwd = 1.5, conf.int = FALSE,
+     xlab = "Waktu (Tahun)", ylab = "Peluang Survival S(t)", 
+     main = "S(t) Stratified Cox: Kovariat mixed")
+
+lines(cox_m0$time, cox_m0$surv, col = "black", lty = 2, lwd = 2, type = "s")
+lines(cox_m1$time, cox_m1$surv, col = "red",   lty = 2, lwd = 2, type = "s")
+
+legend("bottomleft", legend = c("KM: Same", "KM: Mixed", "Cox: Same", "Cox: Mixed"),
+       col = c("black", "red", "black", "red"), lty = c(1,1,2,2), lwd = 2, ncol = 2, cex = 0.8)
+```
+
+### Kovariat Agediff (Asli vs Fitting)
+
+```{r}
+df_a1 <- data.frame(heduc="12-15", mixed="0", agediff="OlderHusband", heblack="0")
+df_a2 <- data.frame(heduc="12-15", mixed="0", agediff="OlderWife",    heblack="0")
+df_a3 <- data.frame(heduc="12-15", mixed="0", agediff="Peer",         heblack="0")
+
+cox_a1 <- survfit(fit_stratified_cox, newdata = df_a1)
+cox_a2 <- survfit(fit_stratified_cox, newdata = df_a2)
+cox_a3 <- survfit(fit_stratified_cox, newdata = df_a3)
+
+km_agediff <- survfit(Surv(years, div) ~ agediff, data = data)
+plot(km_agediff, col = c("black", "red", "blue"), lty = 1, lwd = 1.5, conf.int = FALSE,
+     xlab = "Waktu (Tahun)", ylab = "Peluang Survival S(t)", 
+     main = "S(t) Stratified Cox: Kovariat agediff")
+
+lines(cox_a1$time, cox_a1$surv, col = "black", lty = 2, lwd = 2, type = "s")
+lines(cox_a2$time, cox_a2$surv, col = "red",   lty = 2, lwd = 2, type = "s")
+lines(cox_a3$time, cox_a3$surv, col = "blue",  lty = 2, lwd = 2, type = "s")
+
+legend("bottomleft", legend = c("KM: OlderHus", "KM: OlderWife", "KM: Peer", "Cox: OlderHus", "Cox: OlderWife", "Cox: Peer"),
+       col = c("black", "red", "blue", "black", "red", "blue"), lty = c(1,1,1,2,2,2), lwd = 2, ncol = 2, cex = 0.75)
+```
+
+## **Estimasi Fungsi Hazard dengan Stratified Cox Model**
+
+Tidak kami lakukan, kenapa? Perbandingan antara fungsi hazard empiris dan fungsi hazard hasil fitting *Stratified Cox Model* kurang tepat untuk dilakukan karena model Cox tidak mengasumsikan bentuk parametrik tertentu untuk fungsi hazard dasar (*baseline hazard*). Dalam *Stratified Cox Model*, hazard dinyatakan sebagai $h_k(t|X)=h_{0k}(t)\exp(X\beta)$, dengan $h_{0k}(t)$ diestimasi secara nonparametrik untuk setiap strata dan tidak diperoleh dalam bentuk fungsi hazard yang halus sebagaimana pada model parametrik seperti *Weibull* atau *Log-Logistic*. Akibatnya, fungsi hazard hasil model harus diperoleh melalui diferensiasi numerik terhadap *baseline cumulative hazard* yang berbentuk fungsi tangga (*step function*), sehingga kurva hazard yang dihasilkan cenderung tidak stabil dan rentan menghasilkan lonjakan (*spikes*) yang tidak mencerminkan pola hazard sebenarnya. Selain itu, fungsi hazard empiris yang diestimasi menggunakan pendekatan *kernel smoothing* seperti `muhaz` juga sangat dipengaruhi oleh pemilihan *bandwidth*, sehingga perbedaan yang muncul antara kedua kurva dapat disebabkan oleh perbedaan metode estimasi, bukan semata-mata karena ketidaksesuaian model. Oleh karena itu, evaluasi kecocokan *Stratified Cox Model* umumnya lebih tepat dilakukan melalui perbandingan kurva survival *Kaplan–Meier* dengan kurva survival hasil model atau melalui analisis *cumulative hazard*, dibandingkan dengan membandingkan fungsi hazard secara langsung.
+
+# **MODEL III: EKSPONENSIAL**
+
+```{r}
+fit_exp <- survreg(
+  Surv(years, div) ~ heduc + heblack + mixed + agediff,
+  data = data,
+  dist = "exponential"
+)
+
+summary(fit_exp)
+```
+
+# **MODEL IV: WEIBULL**
+
+```{r}
+fit_weibull <- survreg(
+  Surv(years, div) ~ heduc + heblack + mixed + agediff,
+  data = data,
+  dist = "weibull"
+)
+
+summary(fit_weibull)
+```
+
+# **PERBANDINGAN KEDUA MODEL**
+
+```{r}
+hitung_signif_survreg <- function(model, alpha = 0.05){
+
+  tab <- summary(model)$table
+
+  tab <- tab[
+    !(rownames(tab) %in% c("(Intercept)", "Log(scale)")),
+    ,
+    drop = FALSE
+  ]
+
+  sum(tab[, "p"] < alpha)
+}
+
+hitung_signif_cox <- function(model, alpha = 0.05){
+
+  tab <- summary(model)$coefficients
+
+  sum(tab[, "Pr(>|z|)"] < alpha)
+}
+```
+
+```{r}
+aic_exp <- AIC(fit_exp)
+aic_weibull <- AIC(fit_weibull)
+aic_ll <- AIC(fit_ll)
+aic_cox <- AIC(fit_stratified_cox)
+
+loglik_exp <- fit_exp$loglik[2]
+loglik_weibull <- fit_weibull$loglik[2]
+loglik_ll <- fit_ll$loglik[2]
+loglik_cox <- fit_stratified_cox$loglik[2]
+
+sig_exp <- hitung_signif_survreg(fit_exp)
+sig_weibull <- hitung_signif_survreg(fit_weibull)
+sig_ll <- hitung_signif_survreg(fit_ll)
+sig_cox <- hitung_signif_cox(fit_stratified_cox)
+
+tabel_perbandingan <- data.frame(
+  Model = c(
+    "AFT Exponential",
+    "AFT Weibull",
+    "AFT Log-Logistic",
+    "Stratified Cox"
+  ),
+  Log_Likelihood = round(
+    c(
+      loglik_exp,
+      loglik_weibull,
+      loglik_ll,
+      loglik_cox
+    ),
+    3
+  ),
+  AIC = round(
+    c(
+      aic_exp,
+      aic_weibull,
+      aic_ll,
+      aic_cox
+    ),
+    3
+  ),
+  Jumlah_Peubah_Signifikan = c(
+    sig_exp,
+    sig_weibull,
+    sig_ll,
+    sig_cox
+  )
+)
+
+tabel_perbandingan <- tabel_perbandingan[
+  order(tabel_perbandingan$AIC),
+]
+
+rownames(tabel_perbandingan) <- NULL
+
+print(tabel_perbandingan)
+```
+
+model terbaik yang kami pilih adalah AFT Log-logistik karena memiliki AIC terkecil dan log likelihood terbesar. Selain itu, jumlah peubah signifikan (level di masing2 kovariat) yang signifikan ada sejumlah 5.
